@@ -285,6 +285,8 @@ configs = {
             theta=10_000,
             qkv_bias=True,
             guidance_embed=True,
+            homo_pos_h_max=1024,
+            homo_pos_w_max=1024,
         ),
         ae_path=os.getenv("AE"),
         ae_params=AutoEncoderParams(
