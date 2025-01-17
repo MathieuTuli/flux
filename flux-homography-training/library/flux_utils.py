@@ -18,6 +18,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from library import flux_models
+from library import flux_models_homo
 from library.utils import load_safetensors
 
 MODEL_VERSION_FLUX_V1 = "flux1"
@@ -92,7 +93,8 @@ def analyze_checkpoint_state(ckpt_path: str) -> Tuple[bool, bool, Tuple[int, int
 
 
 def load_flow_model(
-    ckpt_path: str, dtype: Optional[torch.dtype], device: Union[str, torch.device], disable_mmap: bool = False
+    ckpt_path: str, dtype: Optional[torch.dtype], device: Union[str, torch.device], disable_mmap: bool = False,
+    load_homo: bool = True
 ) -> Tuple[bool, flux_models.Flux]:
     is_diffusers, is_schnell, (num_double_blocks, num_single_blocks), ckpt_paths = analyze_checkpoint_state(ckpt_path)
     name = MODEL_NAME_DEV if not is_schnell else MODEL_NAME_SCHNELL
@@ -100,7 +102,10 @@ def load_flow_model(
     # build model
     logger.info(f"Building Flux model {name} from {'Diffusers' if is_diffusers else 'BFL'} checkpoint")
     with torch.device("meta"):
-        params = flux_models.configs[name].params
+        if load_homo:
+            params = flux_models_homo.configs[name].params
+        else:
+            params = flux_models.configs[name].params
 
         # set the number of blocks
         if params.depth != num_double_blocks:
@@ -110,7 +115,10 @@ def load_flow_model(
             logger.info(f"Setting the number of single blocks from {params.depth_single_blocks} to {num_single_blocks}")
             params = replace(params, depth_single_blocks=num_single_blocks)
 
-        model = flux_models.Flux(params)
+        if load_homo:
+            model = flux_models_homo.Flux(params)
+        else:
+            model = flux_models.Flux(params)
         if dtype is not None:
             model = model.to(dtype)
 

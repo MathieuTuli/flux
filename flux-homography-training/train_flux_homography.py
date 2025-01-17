@@ -11,7 +11,7 @@ from accelerate import Accelerator
 from utils import setup_logging, clean_memory_on_device, init_ipex
 # REVISIT:
 from library import (
-    flux_models,
+    flux_models_homo,
     flux_train_utils,
     flux_utils,
     sd3_train_utils,
@@ -91,7 +91,8 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
 
         # if we load to cpu, flux.to(fp8) takes a long time, so we should load to gpu in future
         self.is_schnell, model = flux_utils.load_flow_model(
-            args.pretrained_model_name_or_path, loading_dtype, "cpu", disable_mmap=args.disable_mmap_load_safetensors
+            args.pretrained_model_name_or_path, loading_dtype, "cpu", disable_mmap=args.disable_mmap_load_safetensors,
+            load_homo=True
         )
         if args.fp8_base:
             # check dtype of model
@@ -352,7 +353,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         latents,
         batch,
         text_encoder_conds,
-        unet: flux_models.Flux,
+        unet: flux_models_homo.HomoFlux,
         network,
         weight_dtype,
         train_unet,
@@ -576,7 +577,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
             return super().prepare_unet_with_accelerator(args, accelerator, unet)
 
         # if we doesn't swap blocks, we can move the model to device
-        flux: flux_models.Flux = unet
+        flux: flux_models_homo.HomoFlux = unet
         flux = accelerator.prepare(flux, device_placement=[
                                    not self.is_swapping_blocks])
         accelerator.unwrap_model(flux).move_to_device_except_swap_blocks(
