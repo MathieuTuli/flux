@@ -1,10 +1,11 @@
 {
-    "dataset_path": "dataset/test",
+    "dataset_path": "datasets/main",
     "caption_mode": null,
     "mode": "face",
     "dataset_toml": "template/dataset.toml",
     "eval_prompts": "template/eval_prompts.txt",
-
+    "caption_prefix": "none",
+    "masking_prompt": "none",
     "full_finetune": false,
     "sample_at_first": true,
     "lora_rank": "8",
@@ -15,10 +16,11 @@
     "gradient_accumulation_steps": "1",
     "noise_offset": "0.1",
     "ip_noise_gamma": "0.1",
+    "guidance_scale": "1.0",
     "seed": "42",
 
-    "MODEL_PATH": "models/flux1-dev.safetensors",
+    "MODEL_PATH": "/home/mat/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-Fill-dev/snapshots/6d92c296315be5f54318a6d2659f11465339f934/flux1-fill-dev.safetensors",
     "CLIP_L_PATH": "models/clip_l.safetensors",
     "T5XXL_PATH": "models/t5xxl_fp16.safetensors",
-    "AE_PATH": "models/ae.safetensors"
+    "AE_PATH": "/home/mat/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-Fill-dev/snapshots/6d92c296315be5f54318a6d2659f11465339f934/ae.safetensors"
 }

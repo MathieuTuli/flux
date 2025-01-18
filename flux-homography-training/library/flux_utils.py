@@ -95,7 +95,7 @@ def analyze_checkpoint_state(ckpt_path: str) -> Tuple[bool, bool, Tuple[int, int
 def load_flow_model(
     ckpt_path: str, dtype: Optional[torch.dtype], device: Union[str, torch.device], disable_mmap: bool = False,
     load_homo: bool = True
-) -> Tuple[bool, flux_models.Flux]:
+) -> Tuple[bool, flux_models_homo.HomoFlux]:
     is_diffusers, is_schnell, (num_double_blocks, num_single_blocks), ckpt_paths = analyze_checkpoint_state(ckpt_path)
     name = MODEL_NAME_DEV if not is_schnell else MODEL_NAME_SCHNELL
 
@@ -103,6 +103,7 @@ def load_flow_model(
     logger.info(f"Building Flux model {name} from {'Diffusers' if is_diffusers else 'BFL'} checkpoint")
     with torch.device("meta"):
         if load_homo:
+            name = "dev-fill"
             params = flux_models_homo.configs[name].params
         else:
             params = flux_models.configs[name].params
@@ -116,7 +117,7 @@ def load_flow_model(
             params = replace(params, depth_single_blocks=num_single_blocks)
 
         if load_homo:
-            model = flux_models_homo.Flux(params)
+            model = flux_models_homo.HomoFlux(params)
         else:
             model = flux_models.Flux(params)
         if dtype is not None:

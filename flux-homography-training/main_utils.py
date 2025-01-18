@@ -43,8 +43,7 @@ def construct_toml(config: Dict[str, Any]) -> Dict[str, Any]:
                     if config["caption_prefix"]:
                         subset['caption_prefix'] = config["caption_prefix"]
 
-    logging.info(f"All instances of 'image_dir' in dataset.toml updated to: {
-                 config['dataset_path']}")
+    logging.info(f"All instances of 'image_dir' in dataset.toml updated to: {config['dataset_path']}")
 
     toml_data['general']['flip_aug'] = config["mode"] != "face"
     if not toml_data['general']['flip_aug']:
@@ -363,8 +362,7 @@ def unzip_file(file_path: str, extract_to: str):
             for file_info in zip_ref.infolist():
                 if file_info.filename[-1] == '/':  # Skip directories
                     continue
-                file_info.filename = f"{
-                    uuid.uuid4()}_{os.path.basename(file_info.filename)}"
+                file_info.filename = f"{uuid.uuid4()}_{os.path.basename(file_info.filename)}"
                 zip_ref.extract(file_info, extract_to)
         print(f"Unzipped {file_path} successfully.")
     except Exception as e:

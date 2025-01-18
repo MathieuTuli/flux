@@ -37,7 +37,7 @@ import toml
 from tqdm import tqdm
 
 import torch
-from device_utils import init_ipex, clean_memory_on_device
+from utils import init_ipex, clean_memory_on_device
 
 init_ipex()
 
@@ -355,8 +355,7 @@ class NetworkTrainer:
             blueprint_generator = BlueprintGenerator(
                 ConfigSanitizer(True, True, args.masked_loss, True))
             if use_user_config:
-                logger.info(f"Loading dataset config from {
-                            args.dataset_config}")
+                logger.info(f"Loading dataset config from {args.dataset_config}")
                 user_config = config_util.load_user_config(args.dataset_config)
                 ignored = ["train_data_dir", "reg_data_dir", "in_json"]
                 if any(getattr(args, attr) is not None for attr in ignored):
@@ -454,8 +453,7 @@ class NetworkTrainer:
                 else:
                     multiplier = args.base_weights_multiplier[i]
 
-                accelerator.print(f"merging module: {
-                                  weight_path} with multiplier {multiplier}")
+                accelerator.print(f"merging module: {weight_path} with multiplier {multiplier}")
 
                 module, weights_sd = network_module.create_network_from_weights(
                     multiplier, weight_path, vae, text_encoder, unet, for_inference=True
@@ -463,8 +461,7 @@ class NetworkTrainer:
                 module.merge_to(text_encoder, unet, weights_sd, weight_dtype,
                                 accelerator.device if args.lowram else "cpu")
 
-            accelerator.print(f"all weights merged: {
-                              ', '.join(args.base_weights)}")
+            accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")
 
         # 学習を準備する
         if cache_latents:
@@ -541,8 +538,7 @@ class NetworkTrainer:
         if args.network_weights is not None:
             # FIXME consider alpha of weights: this assumes that the alpha is not changed
             info = network.load_weights(args.network_weights)
-            accelerator.print(f"load network weights from {
-                              args.network_weights}: {info}")
+            accelerator.print(f"load network weights from {args.network_weights}: {info}")
 
         if args.gradient_checkpointing:
             if args.cpu_offload_checkpointing:
@@ -630,8 +626,7 @@ class NetworkTrainer:
                 args.gradient_accumulation_steps
             )
             accelerator.print(
-                f"override steps. steps for {
-                    args.max_train_epochs} epochs is / 指定エポックまでのステップ数: {args.max_train_steps}"
+                f"override steps. steps for {args.max_train_epochs} epochs is / 指定エポックまでのステップ数: {args.max_train_steps}"
             )
 
         # データセット側にも学習ステップを送信
@@ -777,8 +772,7 @@ class NetworkTrainer:
             # save current ecpoch and step
             train_state_file = os.path.join(output_dir, "train_state.json")
             # +1 is needed because the state is saved before current_step is set from global_step
-            logger.info(f"save train state to {train_state_file} at epoch {
-                        current_epoch.value} step {current_step.value+1}")
+            logger.info(f"save train state to {train_state_file} at epoch {current_epoch.value} step {current_step.value+1}")
             with open(train_state_file, "w", encoding="utf-8") as f:
                 json.dump({"current_epoch": current_epoch.value,
                           "current_step": current_step.value + 1}, f)
@@ -802,8 +796,7 @@ class NetworkTrainer:
                 with open(train_state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 steps_from_state = data["current_step"]
-                logger.info(f"load train state from {
-                            train_state_file}: {data}")
+                logger.info(f"load train state from {train_state_file}: {data}")
 
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
@@ -834,8 +827,7 @@ class NetworkTrainer:
             f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
         accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
         accelerator.print(
-            f"  batch size per device / バッチサイズ: {
-                ', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
+            f"  batch size per device / バッチサイズ: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
         )
         # accelerator.print(f"  total train batch size (with parallel & distributed & accumulation) / 総バッチサイズ（並列学習、勾配合計含む）: {total_batch_size}")
         accelerator.print(
@@ -1195,8 +1187,7 @@ class NetworkTrainer:
         # training loop
         if initial_step > 0:  # only if skip_until_initial_step is specified
             for skip_epoch in range(epoch_to_start):  # skip epochs
-                logger.info(f"skipping epoch {
-                            skip_epoch+1} because initial_step (multiplied) is {initial_step}")
+                logger.info(f"skipping epoch {skip_epoch+1} because initial_step (multiplied) is {initial_step}")
                 initial_step -= len(train_dataloader)
             global_step = initial_step
 
@@ -1208,8 +1199,7 @@ class NetworkTrainer:
             # skip the second parameter. because CLIP first two parameters are embeddings
             params_itr.__next__()
             param_3rd = params_itr.__next__()
-            logger.info(f"text_encoder [{i}] dtype: {
-                        param_3rd.dtype}, device: {t_enc.device}")
+            logger.info(f"text_encoder [{i}] dtype: {param_3rd.dtype}, device: {t_enc.device}")
 
         clean_memory_on_device(accelerator.device)
 

@@ -113,8 +113,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         self.is_swapping_blocks = args.blocks_to_swap is not None and args.blocks_to_swap > 0
         if self.is_swapping_blocks:
             # Swap blocks between CPU and GPU to reduce memory usage, in forward and backward passes.
-            logger.info(f"enable block swap: blocks_to_swap={
-                        args.blocks_to_swap}")
+            logger.info(f"enable block swap: blocks_to_swap={args.blocks_to_swap}")
             model.enable_block_swap(args.blocks_to_swap, accelerator.device)
 
         clip_l = flux_utils.load_clip_l(
@@ -237,8 +236,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
 
             # cache sample prompts
             if args.sample_prompts is not None:
-                logger.info(f"cache Text Encoder outputs for sample prompt: {
-                            args.sample_prompts}")
+                logger.info(f"cache Text Encoder outputs for sample prompt: {args.sample_prompts}")
 
                 tokenize_strategy: strategy_flux.FluxTokenizeStrategy = strategy_base.TokenizeStrategy.get_strategy()
                 text_encoding_strategy: strategy_flux.FluxTextEncodingStrategy = strategy_base.TextEncodingStrategy.get_strategy()
@@ -565,8 +563,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
             if flux_utils.get_t5xxl_actual_dtype(text_encoder) == torch.float8_e4m3fn and text_encoder.dtype == weight_dtype:
                 logger.info(f"T5XXL already prepared for fp8")
             else:
-                logger.info(f"prepare T5XXL for fp8: set to {
-                            te_weight_dtype}, set embeddings to {weight_dtype}, add hooks")
+                logger.info(f"prepare T5XXL for fp8: set to {te_weight_dtype}, set embeddings to {weight_dtype}, add hooks")
                 text_encoder.to(te_weight_dtype)  # fp8
                 prepare_fp8(text_encoder, weight_dtype)
 
