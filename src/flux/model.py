@@ -30,8 +30,8 @@ class FluxParams:
     theta: int
     qkv_bias: bool
     guidance_embed: bool
-    homo_pos_h_max: int
-    homo_pos_w_max: int
+    homo_pos_h_max: int | None = None
+    homo_pos_w_max: int | None = None
 
 
 class Flux(nn.Module):
