@@ -145,6 +145,7 @@ class Flux(nn.Module):
                 poses.append(pos)
             poses = torch.Tensor(poses, device=img.device)
             h_indices, w_indices = pos.unbind(dim=-1)
+            import pdb; pdb.set_trace()
             homo_pos_h = self.homo_embed_h[h_indices]
             homo_pos_w = self.homo_embed_w[w_indices]
             pe = pe + homo_pos_h + homo_pos_w

@@ -9,6 +9,7 @@ from einops import rearrange, repeat
 from torch.optim import AdamW
 from PIL import Image
 
+import bitsandbytes
 import numpy as np
 import torch
 
@@ -21,6 +22,7 @@ from flux.modules.lora import LinearLora, replace_linear_with_lora
 from flux.modules.autoencoder import AutoEncoder
 from flux.modules.conditioner import HFEmbedder
 from flux.model import FluxLoraWrapper, Flux
+from flux.sampling import unpack
 
 
 @dataclass
@@ -217,7 +219,7 @@ def main():
         for param_name, param in module.named_parameters(recurse=False):
             full_name = f"{name}.{param_name}" if name else param_name
             if isinstance(module, LinearLora):
-                param.requires_grad = True
+                param.requires_grad_(True)
                 print(f"Setting grad for {full_name} to True")
             else:
                 param.requires_grad = False
@@ -238,7 +240,7 @@ def main():
     )
 
     # Training setup
-    optimizer = AdamW(model.parameters(), lr=config.learning_rate)
+    optimizer = bitsandbytes.optim.AdamW8bit(model.parameters(), lr=config.learning_rate)
 
     # Training loop
     for epoch in range(config.num_epochs):
@@ -266,6 +268,7 @@ def main():
             for k in inputs.keys():
                 inputs[k] = inputs[k].to(device)
                 inputs[k] = inputs[k].to(torch.bfloat16)
+            import pdb; pdb.set_trace()
             pred = model(
                 img=torch.cat((inputs["img"], inputs["img_cond"]), dim=-1),
                 img_ids=inputs["img_ids"],
@@ -275,13 +278,15 @@ def main():
                 timesteps=inputs["t"],
                 guidance=guids
             )
-            if offload:
-                model.cpu()
-                torch.cuda.empty_cache()
+            pred = unpack(pred, 512, 512)
             loss = torch.pow(pred - inputs["vt"], 2).mean()
             loss.backward()
             optimizer.step()
-            epoch_loss += loss
+            if offload:
+                model.cpu()
+                torch.cuda.empty_cache()
+            print(f"Step loss: {loss.item():.4f}")
+            epoch_loss += loss.item()
 
         print(
             f"Epoch {epoch+1}/{config.num_epochs}, Loss: {epoch_loss/len(dataloader):.4f}")
