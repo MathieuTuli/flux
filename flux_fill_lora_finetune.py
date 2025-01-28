@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Tuple
 from pathlib import Path
 
-from safetensors.torch import load_file as load_sft
+from safetensors.torch import load_file as load_sft, save_file
 from torch.utils.data import Dataset, DataLoader
 from huggingface_hub import hf_hub_download
 from einops import rearrange, repeat
@@ -11,6 +11,7 @@ from PIL import Image
 
 import bitsandbytes
 import numpy as np
+import random
 import torch
 
 from flux.util import (
@@ -25,11 +26,34 @@ from flux.model import FluxLoraWrapper, Flux
 from flux.sampling import unpack
 
 
+def make_rec_mask(images, resolution, times=30):
+    mask, times = torch.ones_like(images[0:1, :, :]), np.random.randint(
+        1, times
+    )
+    min_size, max_size, margin = np.array([0.03, 0.25, 0.01]) * resolution
+    max_size = min(max_size, resolution - margin * 2)
+
+    for _ in range(times):
+        width = np.random.randint(int(min_size), int(max_size))
+        height = np.random.randint(int(min_size), int(max_size))
+
+        x_start = np.random.randint(
+            int(margin), resolution - int(margin) - width + 1
+        )
+        y_start = np.random.randint(
+            int(margin), resolution - int(margin) - height + 1
+        )
+        mask[:, y_start: y_start + height, x_start: x_start + width] = 0
+
+    mask = 1 - mask if random.random() < 0.5 else mask
+    return mask
+
+
 @dataclass
 class TrainingConfig:
-    batch_size: int = 1
+    batch_size: int = 4
     learning_rate: float = 1e-4
-    num_epochs: int = 100
+    num_epochs: int = 200
     save_every: int = 50
     num_steps: int = 50
     guidance: float = 1.0
@@ -43,35 +67,63 @@ class FluxFillDataset(Dataset):
                  height: int = 512,
                  width: int = 512):
         root = root if isinstance(root, Path) else Path(root)
-        self.image_paths = [f for f in root.iterdir()
-                            if str(f).endswith(('img.jpg', 'img.png', 'img.jpeg'))]
-        self.mask_paths = [f for f in root.iterdir()
-                           if str(f).endswith(('mask.jpg', 'mask.png', 'mask.jpeg'))]
-        assert len(self.image_paths) == len(self.mask_paths)
+        self.image_paths = [f for f in root.iterdir()]
+        # self.mask_paths = [f for f in root.iterdir()
+        #                    if str(f).endswith(('mask.jpg', 'mask.png', 'mask.jpeg'))]
+        # assert len(self.image_paths) == len(self.mask_paths)
         self.prompt = prompt
         self.height = height
         self.width = width
-
-        assert len(self.image_paths) == len(
-            self.mask_paths), "Number of images and masks must match"
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
-        mask_path = self.mask_paths[idx]
-        img = Image.open(img_path).convert("RGB").resize((512, 512))
+        img = Image.open(img_path).convert("RGB")
+        w, h = img.size
+
+        # Randomly select quadrant (0: top-left, 1: top-right, 2: bottom-left, 3: bottom-right)
+        quadrant = random.randint(0, 3)
+
+        # Calculate crop coordinates based on quadrant
+        crop_w, crop_h = w // 2, h // 2
+        if quadrant == 0:  # top-left
+            x1, y1 = 0, 0
+        elif quadrant == 1:  # top-right
+            x1, y1 = crop_w, 0
+        elif quadrant == 2:  # bottom-left
+            x1, y1 = 0, crop_h
+        else:  # bottom-right
+            x1, y1 = crop_w, crop_h
+        x2, y2 = x1 + crop_w, y1 + crop_h
+
+        # Store crop coordinates and perform crop
+        img = img.crop((x1, y1, x2, y2)).resize((512, 512))
+
+        x = 1
+        if quadrant == 0:  # top-left
+            crop_coords = torch.Tensor([[0, 0], [x, x]])
+        elif quadrant == 1:  # top-right
+            crop_coords = torch.Tensor([[x, 0], [x * 2, x]])
+        elif quadrant == 2:  # bottom-left
+            crop_coords = torch.Tensor([[0, x], [x, x * 2]])
+        else:  # bottom-right
+            crop_coords = torch.Tensor([[x, x], [x * 2, x * 2]])
         img = np.array(img)
         img = torch.from_numpy(img).float() / 127.5 - 1.0
         img = rearrange(img, "h w c -> c h w")
 
-        mask = Image.open(mask_path).convert("L").resize((512, 512))
-        mask = np.array(mask)
-        mask = torch.from_numpy(mask).float() / 255.0
-        mask = rearrange(mask, "h w -> 1 h w")
+        # mask_path = self.mask_paths[idx]
+        # mask = Image.open(mask_path).convert("L").resize((512, 512))
+        # mask = np.array(mask)
+        # mask = torch.from_numpy(mask).float() / 255.0
+        # mask = rearrange(mask, "h w -> 1 h w")
 
-        return img, mask
+        mask = make_rec_mask(img.unsqueeze(
+            0), resolution=512, times=30).squeeze(0)
+
+        return img, mask, crop_coords
 
 
 class OptimalTransportPath:
@@ -211,15 +263,20 @@ def main():
             sd, strict=False, assign=True)
         print_load_warning(missing, unexpected)
 
-    lora_rank = 16
+    lora_rank = 8
     lora_scale = 1.0
-    replace_linear_with_lora(model, lora_rank, lora_scale)
+    replace_linear_with_lora(model, lora_rank, lora_scale, recursive=False,
+                             keys_override=["single_blocks"])
+
+    model.requires_grad_(False)
 
     def set_requires_grad_recursive(module, name=''):
         for param_name, param in module.named_parameters(recurse=False):
             full_name = f"{name}.{param_name}" if name else param_name
             if isinstance(module, LinearLora):
-                param.requires_grad_(True)
+                param.requires_grad_(False)
+                param.lora_A.requires_grad_(True)
+                param.lora_B.requires_grad_(True)
                 print(f"Setting grad for {full_name} to True")
             else:
                 param.requires_grad = False
@@ -240,7 +297,8 @@ def main():
     )
 
     # Training setup
-    optimizer = bitsandbytes.optim.AdamW8bit(model.parameters(), lr=config.learning_rate)
+    optimizer = bitsandbytes.optim.AdamW8bit(
+        model.parameters(), lr=config.learning_rate)
 
     # Training loop
     for epoch in range(config.num_epochs):
@@ -251,7 +309,7 @@ def main():
 
             if offload:
                 t5, clip, ae = t5.to(device), clip.to(device), ae.to(device)
-            img, mask = batch
+            img, mask, coords = batch
             img, mask = img.to(device), mask.to(device)
             inputs = prepare_fill(
                 t5=t5, clip=clip, ae=ae,
@@ -268,7 +326,6 @@ def main():
             for k in inputs.keys():
                 inputs[k] = inputs[k].to(device)
                 inputs[k] = inputs[k].to(torch.bfloat16)
-            import pdb; pdb.set_trace()
             pred = model(
                 img=torch.cat((inputs["img"], inputs["img_cond"]), dim=-1),
                 img_ids=inputs["img_ids"],
@@ -276,23 +333,29 @@ def main():
                 txt_ids=inputs["txt_ids"],
                 y=inputs["vec"],
                 timesteps=inputs["t"],
-                guidance=guids
+                guidance=guids,
+                homo_pos_map=coords,
             )
             pred = unpack(pred, 512, 512)
             loss = torch.pow(pred - inputs["vt"], 2).mean()
+            del inputs
             loss.backward()
             optimizer.step()
+            print(f"Step loss: {loss.item():.4f}")
+            epoch_loss += loss.item()
             if offload:
                 model.cpu()
                 torch.cuda.empty_cache()
-            print(f"Step loss: {loss.item():.4f}")
-            epoch_loss += loss.item()
 
         print(
             f"Epoch {epoch+1}/{config.num_epochs}, Loss: {epoch_loss/len(dataloader):.4f}")
 
         if (epoch + 1) % config.save_every == 0:
-            torch.save(
+            # torch.save(
+            #     model.state_dict(),
+            #     f"lora_checkpoint_epoch_{epoch+1}.safetensors"
+            # )
+            save_file(
                 model.state_dict(),
                 f"lora_checkpoint_epoch_{epoch+1}.safetensors"
             )

@@ -51,22 +51,25 @@ class Flux(nn.Module):
             )
         pe_dim = params.hidden_size // params.num_heads
         if sum(params.axes_dim) != pe_dim:
-            raise ValueError(f"Got {params.axes_dim} but expected positional dim {pe_dim}")
+            raise ValueError(
+                f"Got {params.axes_dim} but expected positional dim {pe_dim}")
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
-        self.pe_embedder = EmbedND(dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
+        self.pe_embedder = EmbedND(
+            dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
 
         # -- homo shit
-        self.homo_embed_h = nn.Parameter(torch.randn(
-            params.homo_pos_h_max // 2, pe_dim))
-        self.homo_embed_w = nn.Parameter(torch.randn(
-            params.homo_pos_w_max // 2, pe_dim))
+        self.homo_embed_h = nn.Parameter(torch.zeros(
+            2, 256))
+        self.homo_embed_w = nn.Parameter(torch.zeros(
+            2, 256))
         # --
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
         self.vector_in = MLPEmbedder(params.vec_in_dim, self.hidden_size)
         self.guidance_in = (
-            MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size) if params.guidance_embed else nn.Identity()
+            MLPEmbedder(
+                in_dim=256, hidden_dim=self.hidden_size) if params.guidance_embed else nn.Identity()
         )
         self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size)
 
@@ -84,7 +87,8 @@ class Flux(nn.Module):
 
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio)
+                SingleStreamBlock(self.hidden_size,
+                                  self.num_heads, mlp_ratio=params.mlp_ratio)
                 for _ in range(params.depth_single_blocks)
             ]
         )
@@ -103,14 +107,16 @@ class Flux(nn.Module):
         homo_pos_map: Tensor | None = None,
     ) -> Tensor:
         if img.ndim != 3 or txt.ndim != 3:
-            raise ValueError("Input img and txt tensors must have 3 dimensions.")
+            raise ValueError(
+                "Input img and txt tensors must have 3 dimensions.")
 
         # running on sequences img
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
         if self.params.guidance_embed:
             if guidance is None:
-                raise ValueError("Didn't get guidance strength for guidance distilled model.")
+                raise ValueError(
+                    "Didn't get guidance strength for guidance distilled model.")
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
@@ -118,7 +124,10 @@ class Flux(nn.Module):
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
 
-        # -- homo shit
+        for block in self.double_blocks:
+            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+
+        # -- homo shit - only do for single blocks which are fine tuned
         if homo_pos_map is not None:
             # @homo_pos_map: a Tensor of shape (B, 2, 2)
             #   with coordinates for current quadrant
@@ -133,7 +142,6 @@ class Flux(nn.Module):
             # >     or even then, ideally you could pass crop coordinates here?
             # > wait no I can, I just need to use fractional coordinates
             # >     and offset them based on quadrant
-            homo_pos_map = homo_pos_map // 2
             poses = list()
             for coords in homo_pos_map:
                 pos = torch.stack(torch.meshgrid((
@@ -143,23 +151,24 @@ class Flux(nn.Module):
                 pos = rearrange(pos, 'h w c -> (h w) c')
                 # pos = repeat(pos, 'n d -> b n d', b=img.shape[0])
                 poses.append(pos)
-            poses = torch.Tensor(poses, device=img.device)
-            h_indices, w_indices = pos.unbind(dim=-1)
-            import pdb; pdb.set_trace()
+            poses = torch.stack(poses, dim=0).to(img.device).int()
+            h_indices, w_indices = poses.unbind(dim=-1)
             homo_pos_h = self.homo_embed_h[h_indices]
             homo_pos_w = self.homo_embed_w[w_indices]
+            b = homo_pos_h.shape[0]
+            homo_pos_h = homo_pos_h.reshape(b, 1, 1, 64, 2, 2)
+            homo_pos_w = homo_pos_w.reshape(b, 1, 1, 64, 2, 2)
             pe = pe + homo_pos_h + homo_pos_w
+            del homo_pos_h, homo_pos_w, poses, h_indices, w_indices
         # --
-
-        for block in self.double_blocks:
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
 
         img = torch.cat((txt, img), 1)
         for block in self.single_blocks:
             img = block(img, vec=vec, pe=pe)
-        img = img[:, txt.shape[1] :, ...]
+        img = img[:, txt.shape[1]:, ...]
 
-        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
+        # (N, T, patch_size ** 2 * out_channels)
+        img = self.final_layer(img, vec)
         return img
 
 

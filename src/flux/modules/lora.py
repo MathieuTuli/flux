@@ -6,6 +6,8 @@ def replace_linear_with_lora(
     module: nn.Module,
     max_rank: int,
     scale: float = 1.0,
+    recursive: bool = True,
+    keys_override: list[str] = None
 ) -> None:
     for name, child in module.named_children():
         if isinstance(child, nn.Linear):
@@ -23,11 +25,12 @@ def replace_linear_with_lora(
             new_lora.bias = child.bias if child.bias is not None else None
 
             setattr(module, name, new_lora)
-        else:
+        elif recursive or name in keys_override:
             replace_linear_with_lora(
                 module=child,
                 max_rank=max_rank,
                 scale=scale,
+                recursive=True
             )
 
 
