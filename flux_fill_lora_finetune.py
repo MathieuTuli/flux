@@ -263,29 +263,29 @@ def main():
             sd, strict=False, assign=True)
         print_load_warning(missing, unexpected)
 
-    lora_rank = 8
+    lora_rank = 16
     lora_scale = 1.0
     replace_linear_with_lora(model, lora_rank, lora_scale, recursive=False,
-                             keys_override=["single_blocks"])
+                             keys_override=["single_blocks", "final_layer"],
+                             keys_ignore=["img_in", "txt_in"],
+                             )
 
     model.requires_grad_(False)
 
     def set_requires_grad_recursive(module, name=''):
-        for param_name, param in module.named_parameters(recurse=False):
-            full_name = f"{name}.{param_name}" if name else param_name
-            if isinstance(module, LinearLora):
-                param.requires_grad_(False)
-                param.lora_A.requires_grad_(True)
-                param.lora_B.requires_grad_(True)
-                print(f"Setting grad for {full_name} to True")
-            else:
-                param.requires_grad = False
-
+        if isinstance(module, LinearLora):
+            module.requires_grad_(False)
+            module.lora_A.requires_grad_(True)
+            module.lora_B.requires_grad_(True)
         for child_name, child in module.named_children():
             child_full_name = f"{name}.{child_name}" if name else child_name
             set_requires_grad_recursive(child, child_full_name)
 
     set_requires_grad_recursive(model)
+
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name)
 
     dataset = FluxFillDataset(root="cube-dataset")
 
@@ -334,7 +334,7 @@ def main():
                 y=inputs["vec"],
                 timesteps=inputs["t"],
                 guidance=guids,
-                homo_pos_map=coords,
+                homo_pos_map=None  # coords,
             )
             pred = unpack(pred, 512, 512)
             loss = torch.pow(pred - inputs["vt"], 2).mean()

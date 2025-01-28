@@ -7,9 +7,14 @@ def replace_linear_with_lora(
     max_rank: int,
     scale: float = 1.0,
     recursive: bool = True,
-    keys_override: list[str] = None
+    keys_override: list[str] = None,
+    keys_ignore: list[str] = None,
 ) -> None:
+    keys_override = keys_override or list()
+    keys_ignore = keys_ignore or list()
     for name, child in module.named_children():
+        if name in keys_ignore:
+            continue
         if isinstance(child, nn.Linear):
             new_lora = LinearLora(
                 in_features=child.in_features,

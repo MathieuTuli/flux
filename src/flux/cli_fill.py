@@ -226,8 +226,33 @@ def main(
     # init all components
     t5 = load_t5(torch_device, max_length=128)
     clip = load_clip(torch_device)
-    model = load_flow_model(name, device="cpu" if offload else torch_device)
+    # model = load_flow_model(name, device="cpu" if offload else torch_device)
     ae = load_ae(name, device="cpu" if offload else torch_device)
+    # MY LOADING
+    from flux.util import optionally_expand_state_dict, print_load_warning
+    from flux.modules.lora import LinearLora, replace_linear_with_lora
+    from safetensors.torch import load_file as load_sft
+    from flux.model import Flux
+    model = Flux(
+        params=configs[name].params)
+
+    lora_rank = 8
+    lora_scale = 1.0
+    replace_linear_with_lora(model, lora_rank, lora_scale, recursive=False,
+                             keys_override=["single_blocks"])
+    # ckpt_path = configs[name].ckpt_path
+    ckpt_path = "checkpoints/ft-lora-test/lora_checkpoint_epoch_100.safetensors"
+    if ckpt_path is not None:
+        print("Loading checkpoint")
+        # load_sft doesn't support torch.device
+        sd = load_sft(
+            ckpt_path, device="cpu" if offload else str(device))
+        sd = optionally_expand_state_dict(model, sd)
+        missing, unexpected = model.load_state_dict(
+            sd, strict=False, assign=True)
+        print_load_warning(missing, unexpected)
+
+    # ----------
 
     rng = torch.Generator(device="cpu")
     with Image.open(img_cond_path) as img:
