@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import Tuple
 from pathlib import Path
 
+import functools
+
 from safetensors.torch import load_file as load_sft, save_file
 from torch.utils.data import Dataset, DataLoader
 from huggingface_hub import hf_hub_download
@@ -240,6 +242,7 @@ def prepare_fill(
     return_dict["img_cond"] = img_cond
     return_dict["t"] = t
     return_dict["vt"] = vt
+    return return_dict
 
 
 def setup_distribution():
@@ -263,24 +266,56 @@ def get_mixed_precision_policy():
 
 
 def wrap_flux_model(model, local_rank):
-    # Define FSDP wrapping policy
+    # Define the module classes to wrap
     transformer_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
         transformer_layer_cls={
-            # Add your transformer block classes here if any
+            'DoubleStreamBlock',
+            'SingleStreamBlock',
+            'LastLayer',
+            'MLPEmbedder'
         },
     )
 
+    # We can also add a size-based policy as backup
+    size_policy = functools.partial(
+        size_based_auto_wrap_policy,
+        min_num_params=10000  # Shard any other large layers
+    )
+
+    # Combine policies
+    def combined_policy(module, recurse, unwrapped_params):
+        # Try transformer policy first
+        if transformer_wrap_policy(module, recurse, unwrapped_params):
+            return True
+        # If that doesn't match, try size policy
+        return size_policy(module, recurse, unwrapped_params)
+
     fsdp_config = dict(
-        auto_wrap_policy=transformer_wrap_policy,
+        auto_wrap_policy=combined_policy,
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         mixed_precision=get_mixed_precision_policy(),
         device_id=torch.cuda.current_device(),
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
-        use_orig_params=True
+        use_orig_params=True,
+        # Add activation checkpointing for the transformer blocks
+        activation_checkpointing_policy={
+            'DoubleStreamBlock': True,
+            'SingleStreamBlock': True
+        }
     )
 
-    return FSDP(model, **fsdp_config) return return_dict
+    # If still having memory issues, can add CPU offload
+    # cpu_offload=CPUOffload(offload_params=True)
+
+    return FSDP(model, **fsdp_config)
+
+
+def print_gpu_memory(rank):
+    if rank == 0:  # Only print from first process
+        for i in range(torch.cuda.device_count()):
+            memory = torch.cuda.memory_allocated(i) / 1024**3
+            print(f"GPU {i} memory allocated: {memory:.2f} GB")
 
 
 def main():
@@ -358,10 +393,15 @@ def main():
     )
 
     # Training loop
+    print_gpu_memory(local_rank)
     for epoch in range(config.num_epochs):
         sampler.set_epoch(epoch)  # Important for proper shuffling
         model.train()
         epoch_loss = 0
+
+        if epoch == 0:
+            print_gpu_memory(local_rank)
+            print("Memory usage before first batch") if local_rank == 0 else None
 
         for batch in dataloader:
             optimizer.zero_grad()
