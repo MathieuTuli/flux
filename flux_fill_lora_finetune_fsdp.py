@@ -266,6 +266,10 @@ def get_mixed_precision_policy():
 
 
 def wrap_flux_model(model, local_rank):
+    from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy, size_based_auto_wrap_policy
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp import MixedPrecision, BackwardPrefetch, ShardingStrategy
+
     # Define the module classes to wrap
     transformer_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
@@ -297,16 +301,8 @@ def wrap_flux_model(model, local_rank):
         mixed_precision=get_mixed_precision_policy(),
         device_id=torch.cuda.current_device(),
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
-        use_orig_params=True,
-        # Add activation checkpointing for the transformer blocks
-        activation_checkpointing_policy={
-            'DoubleStreamBlock': True,
-            'SingleStreamBlock': True
-        }
+        use_orig_params=True
     )
-
-    # If still having memory issues, can add CPU offload
-    # cpu_offload=CPUOffload(offload_params=True)
 
     return FSDP(model, **fsdp_config)
 
