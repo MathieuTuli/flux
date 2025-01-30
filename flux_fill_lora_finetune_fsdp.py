@@ -269,15 +269,21 @@ def wrap_flux_model(model, local_rank):
     from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy, size_based_auto_wrap_policy
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
     from torch.distributed.fsdp import MixedPrecision, BackwardPrefetch, ShardingStrategy
+    from flux.modules.layers import (
+        DoubleStreamBlock,
+        SingleStreamBlock,
+        LastLayer,
+        MLPEmbedder,
+    )
 
     # Define the module classes to wrap
     transformer_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
         transformer_layer_cls={
-            'DoubleStreamBlock',
-            'SingleStreamBlock',
-            'LastLayer',
-            'MLPEmbedder'
+            DoubleStreamBlock,
+            SingleStreamBlock,
+            LastLayer,
+            MLPEmbedder
         },
     )
 
@@ -288,12 +294,12 @@ def wrap_flux_model(model, local_rank):
     )
 
     # Combine policies
-    def combined_policy(module, recurse, unwrapped_params):
+    def combined_policy(module, recurse, nonwrapped_numel):
         # Try transformer policy first
-        if transformer_wrap_policy(module, recurse, unwrapped_params):
+        if transformer_wrap_policy(module, recurse, nonwrapped_numel):
             return True
         # If that doesn't match, try size policy
-        return size_policy(module, recurse, unwrapped_params)
+        return size_policy(module, recurse, nonwrapped_numel)
 
     fsdp_config = dict(
         auto_wrap_policy=combined_policy,
