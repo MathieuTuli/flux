@@ -27,6 +27,14 @@ from flux.modules.conditioner import HFEmbedder
 from flux.model import FluxLoraWrapper, Flux
 from flux.sampling import unpack
 
+from flux.modules.layers import (
+    LastLayer,
+    MLPEmbedder,
+    DoubleStreamBlock,
+    SingleStreamBlock,
+)
+from flux.model import DoubleStreamSequential, SingleStreamSequential
+
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     MixedPrecision,
@@ -253,6 +261,7 @@ def setup_distribution():
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     world_size = int(os.environ.get("WORLD_SIZE", -1))
 
+    print("Setting rank ", local_rank)
     torch.cuda.set_device(local_rank)
     return local_rank, world_size
 
@@ -266,31 +275,22 @@ def get_mixed_precision_policy():
 
 
 def wrap_flux_model(model, local_rank):
-    from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy, size_based_auto_wrap_policy
-    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-    from torch.distributed.fsdp import MixedPrecision, BackwardPrefetch, ShardingStrategy
-    from flux.modules.layers import (
-        DoubleStreamBlock,
-        SingleStreamBlock,
-        LastLayer,
-        MLPEmbedder,
-    )
-
-    # Define the module classes to wrap
     transformer_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
         transformer_layer_cls={
             DoubleStreamBlock,
+            DoubleStreamSequential,
             SingleStreamBlock,
+            SingleStreamSequential,
             LastLayer,
-            MLPEmbedder
+            MLPEmbedder,
         },
     )
 
     # We can also add a size-based policy as backup
     size_policy = functools.partial(
         size_based_auto_wrap_policy,
-        min_num_params=10000  # Shard any other large layers
+        min_num_params=1_500_000  # Shard any other large layers
     )
 
     # Combine policies
@@ -301,16 +301,16 @@ def wrap_flux_model(model, local_rank):
         # If that doesn't match, try size policy
         return size_policy(module, recurse, nonwrapped_numel)
 
+    print("Wrapping: ", local_rank, torch.cuda.current_device())
     fsdp_config = dict(
-        auto_wrap_policy=combined_policy,
+        auto_wrap_policy=transformer_wrap_policy,
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         mixed_precision=get_mixed_precision_policy(),
         device_id=torch.cuda.current_device(),
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
-        use_orig_params=True
     )
-
-    return FSDP(model, **fsdp_config)
+    model = FSDP(model, **fsdp_config)
+    return model
 
 
 def print_gpu_memory(rank):
@@ -355,13 +355,25 @@ def main():
         ckpt_path = object_list[0]
 
     # Initialize Flux model
-    model = Flux(params=configs[name].params)
+    model = Flux(params=configs[name].params).to(torch.bfloat16)
+
+    def remap_sd_for_blocks(sd):
+        new_sd = dict()
+
+        for k, v in sd.items():
+            if k.startswith("double_blocks.") or k.startswith("single_blocks."):
+                parts = k.split(".")
+                new_key = f"{parts[0]}.blocks.{'.'.join(parts[1:])}"
+                new_sd[new_key] = v
+            else:
+                new_sd[k] = v
+        return new_sd
 
     if ckpt_path is not None:
         sd = load_sft(ckpt_path, device="cpu")
         sd = optionally_expand_state_dict(model, sd)
         missing, unexpected = model.load_state_dict(
-            sd, strict=False, assign=True)
+            remap_sd_for_blocks(sd), strict=False, assign=True)
         if local_rank == 0:
             print_load_warning(missing, unexpected)
 
@@ -375,7 +387,8 @@ def main():
     )
 
     # Wrap model with FSDP
-    model = wrap_flux_model(model, local_rank)
+    model = wrap_flux_model(model, local_rank+1)
+    print(model)
 
     # Setup dataset and dataloader with DistributedSampler
     dataset = FluxFillDataset(root="cube-dataset")
@@ -412,6 +425,7 @@ def main():
             img = img.to(flux_device)
             mask = mask.to(flux_device)
 
+            inputs = None
             # Prepare inputs on encoder_device (GPU 0)
             if local_rank == 0:
                 inputs = prepare_fill(

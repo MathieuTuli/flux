@@ -34,6 +34,34 @@ class FluxParams:
     homo_pos_w_max: int | None = None
 
 
+class DoubleStreamSequential(nn.Module):
+    def __init__(self, blocks):
+        super().__init__()
+        self.blocks = nn.ModuleList(blocks)
+
+    def __getitem__(self, idx):
+        return self.blocks[idx]
+
+    def forward(self, img, txt, vec, pe):
+        for block in self.blocks:
+            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+        return img, txt
+
+
+class SingleStreamSequential(nn.Module):
+    def __init__(self, blocks):
+        super().__init__()
+        self.blocks = nn.ModuleList(blocks)
+
+    def __getitem__(self, idx):
+        return self.blocks[idx]
+
+    def forward(self, img, vec, pe):
+        for block in self.blocks:
+            img = block(img=img, vec=vec, pe=pe)
+        return img
+
+
 class Flux(nn.Module):
     """
     Transformer model for flow matching on sequences.
@@ -50,6 +78,7 @@ class Flux(nn.Module):
                 f"Hidden size {params.hidden_size} must be divisible by num_heads {params.num_heads}"
             )
         pe_dim = params.hidden_size // params.num_heads
+        import pdb; pdb.set_trace()
         if sum(params.axes_dim) != pe_dim:
             raise ValueError(
                 f"Got {params.axes_dim} but expected positional dim {pe_dim}")
@@ -84,6 +113,7 @@ class Flux(nn.Module):
                 for _ in range(params.depth)
             ]
         )
+        # self.double_blocks = DoubleStreamSequential(double_blocks)
 
         self.single_blocks = nn.ModuleList(
             [
@@ -92,6 +122,7 @@ class Flux(nn.Module):
                 for _ in range(params.depth_single_blocks)
             ]
         )
+        # self.single_blocks = SingleStreamSequential(single_blocks)
 
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
 
@@ -151,7 +182,7 @@ class Flux(nn.Module):
                 pos = rearrange(pos, 'h w c -> (h w) c')
                 # pos = repeat(pos, 'n d -> b n d', b=img.shape[0])
                 poses.append(pos)
-            poses = torch.stack(poses, dim=0).to(img.device).int()
+            poses = torch.stack(poses, dim=0).to("cuda:1").int()
             h_indices, w_indices = poses.unbind(dim=-1)
             homo_pos_h = self.homo_embed_h[h_indices]
             homo_pos_w = self.homo_embed_w[w_indices]

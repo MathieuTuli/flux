@@ -12,6 +12,8 @@ from transformers import pipeline
 from flux.sampling import denoise, get_noise, get_schedule, prepare_fill, unpack
 from flux.util import configs, load_ae, load_clip, load_flow_model, load_t5, save_image
 
+from flux_splitter import split_flux_model_to_gpus, GPUSplitConfig
+
 
 @dataclass
 class SamplingOptions:
@@ -100,14 +102,16 @@ def parse_img_cond_path(options: SamplingOptions | None) -> SamplingOptions | No
         if not os.path.isfile(img_cond_path) or not img_cond_path.lower().endswith(
             (".jpg", ".jpeg", ".png", ".webp")
         ):
-            print(f"File '{img_cond_path}' does not exist or is not a valid image file")
+            print(
+                f"File '{img_cond_path}' does not exist or is not a valid image file")
             continue
         else:
             with Image.open(img_cond_path) as img:
                 width, height = img.size
 
             if width % 32 != 0 or height % 32 != 0:
-                print(f"Image dimensions must be divisible by 32, got {width}x{height}")
+                print(
+                    f"Image dimensions must be divisible by 32, got {width}x{height}")
                 continue
 
         options.img_cond_path = img_cond_path
@@ -146,14 +150,16 @@ def parse_img_mask_path(options: SamplingOptions | None) -> SamplingOptions | No
         if not os.path.isfile(img_mask_path) or not img_mask_path.lower().endswith(
             (".jpg", ".jpeg", ".png", ".webp")
         ):
-            print(f"File '{img_mask_path}' does not exist or is not a valid image file")
+            print(
+                f"File '{img_mask_path}' does not exist or is not a valid image file")
             continue
         else:
             with Image.open(img_mask_path) as img:
                 width, height = img.size
 
             if width % 32 != 0 or height % 32 != 0:
-                print(f"Image dimensions must be divisible by 32, got {width}x{height}")
+                print(
+                    f"Image dimensions must be divisible by 32, got {width}x{height}")
                 continue
             else:
                 with Image.open(options.img_cond_path) as img_cond:
@@ -174,7 +180,7 @@ def parse_img_mask_path(options: SamplingOptions | None) -> SamplingOptions | No
 @torch.inference_mode()
 def main(
     seed: int | None = None,
-    prompt: str = "a white paper cup",
+    prompt: str = "a photo of sks",
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     num_steps: int = 50,
     loop: bool = False,
@@ -203,12 +209,14 @@ def main(
         img_cond_path: path to conditioning image (jpeg/png/webp)
         img_mask_path: path to conditioning mask (jpeg/png/webp
     """
-    nsfw_classifier = pipeline("image-classification", model="Falconsai/nsfw_image_detection", device=device)
+    nsfw_classifier = pipeline(
+        "image-classification", model="Falconsai/nsfw_image_detection", device=device)
 
     name = "flux-dev-fill"
     if name not in configs:
         available = ", ".join(configs.keys())
-        raise ValueError(f"Got unknown model name: {name}, chose from {available}")
+        raise ValueError(
+            f"Got unknown model name: {name}, chose from {available}")
 
     torch_device = torch.device(device)
 
@@ -217,7 +225,8 @@ def main(
         os.makedirs(output_dir)
         idx = 0
     else:
-        fns = [fn for fn in iglob(output_name.format(idx="*")) if re.search(r"img_[0-9]+\.jpg$", fn)]
+        fns = [fn for fn in iglob(output_name.format(
+            idx="*")) if re.search(r"img_[0-9]+\.jpg$", fn)]
         if len(fns) > 0:
             idx = max(int(fn.split("_")[-1].split(".")[0]) for fn in fns) + 1
         else:
@@ -234,24 +243,31 @@ def main(
     from safetensors.torch import load_file as load_sft
     from flux.model import Flux
     model = Flux(
-        params=configs[name].params)
+        params=configs[name].params).to(torch.bfloat16)
 
-    lora_rank = 8
+    lora_rank = 16
     lora_scale = 1.0
-    replace_linear_with_lora(model, lora_rank, lora_scale, recursive=False,
-                             keys_override=["single_blocks"])
+    replace_linear_with_lora(model, lora_rank, lora_scale, recursive=True)
     # ckpt_path = configs[name].ckpt_path
-    ckpt_path = "checkpoints/ft-lora-test/lora_checkpoint_epoch_100.safetensors"
+    # lora_done.safetensors"
+    ckpt_path = "lora-overfit-fixed-mask-full-layers/lora_checkpoint_epoch_200.safetensors"
     if ckpt_path is not None:
         print("Loading checkpoint")
         # load_sft doesn't support torch.device
         sd = load_sft(
-            ckpt_path, device="cpu" if offload else str(device))
+            ckpt_path, device="cpu")
         sd = optionally_expand_state_dict(model, sd)
         missing, unexpected = model.load_state_dict(
             sd, strict=False, assign=True)
         print_load_warning(missing, unexpected)
 
+    gpu_config = GPUSplitConfig(
+        gpu_ids=[1, 2, 3, 4, 5],  # List of GPU IDs to use
+        max_params_per_gpu=5e9,  # Maximum parameters per GPU
+        base_gpu=1  # GPU to place non-distributed components
+    )
+    model = split_flux_model_to_gpus(model, gpu_config)
+    model = model.to()
     # ----------
 
     rng = torch.Generator(device="cpu")
@@ -296,7 +312,8 @@ def main(
         )
         opts.seed = None
         if offload:
-            t5, clip, ae = t5.to(torch_device), clip.to(torch_device), ae.to(torch_device)
+            t5, clip, ae = t5.to(torch_device), clip.to(
+                torch_device), ae.to(torch_device)
         inp = prepare_fill(
             t5,
             clip,
@@ -307,7 +324,8 @@ def main(
             mask_path=opts.img_mask_path,
         )
 
-        timesteps = get_schedule(opts.num_steps, inp["img"].shape[1], shift=(name != "flux-schnell"))
+        timesteps = get_schedule(
+            opts.num_steps, inp["img"].shape[1], shift=(name != "flux-schnell"))
 
         # offload TEs and AE to CPU, load model to gpu
         if offload:
@@ -315,6 +333,8 @@ def main(
             torch.cuda.empty_cache()
             model = model.to(torch_device)
 
+        x = 1
+        inp["coords"] = None # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
         # denoise initial noise
         x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
 
@@ -334,7 +354,8 @@ def main(
         t1 = time.perf_counter()
         print(f"Done in {t1 - t0:.1f}s")
 
-        idx = save_image(nsfw_classifier, name, output_name, idx, x, add_sampling_metadata, prompt)
+        idx = save_image(nsfw_classifier, name, output_name,
+                         idx, x, add_sampling_metadata, prompt)
 
         if loop:
             print("-" * 80)

@@ -38,6 +38,7 @@ def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[st
     if bs == 1 and not isinstance(prompt, str):
         bs = len(prompt)
 
+    # DEPRECATE:
     img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
     if img.shape[0] == 1 and bs > 1:
         img = repeat(img, "1 ... -> bs ...", bs=bs)
@@ -95,7 +96,8 @@ def prepare_control(
         img_cond = ae.encode(img_cond)
 
     img_cond = img_cond.to(torch.bfloat16)
-    img_cond = rearrange(img_cond, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+    img_cond = rearrange(
+        img_cond, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
     if img_cond.shape[0] == 1 and bs > 1:
         img_cond = repeat(img_cond, "1 ... -> bs ...", bs=bs)
 
@@ -141,12 +143,14 @@ def prepare_fill(
             ph=8,
             pw=8,
         )
-        mask = rearrange(mask, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+        mask = rearrange(
+            mask, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
         if mask.shape[0] == 1 and bs > 1:
             mask = repeat(mask, "1 ... -> bs ...", bs=bs)
 
     img_cond = img_cond.to(torch.bfloat16)
-    img_cond = rearrange(img_cond, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+    img_cond = rearrange(
+        img_cond, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
     if img_cond.shape[0] == 1 and bs > 1:
         img_cond = repeat(img_cond, "1 ... -> bs ...", bs=bs)
 
@@ -251,20 +255,25 @@ def denoise(
     guidance: float = 4.0,
     # extra img tokens
     img_cond: Tensor | None = None,
+    coords: Tensor = None
 ):
     # this is ignored for schnell
-    guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
+    guidance_vec = torch.full(
+        (img.shape[0],), guidance, device=img.device, dtype=img.dtype)
     for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
-        t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+        t_vec = torch.full((img.shape[0],), t_curr,
+                           dtype=img.dtype, device=img.device)
         pred = model(
-            img=torch.cat((img, img_cond), dim=-1) if img_cond is not None else img,
+            img=torch.cat((img, img_cond), dim=-
+                          1) if img_cond is not None else img,
             img_ids=img_ids,
             txt=txt,
             txt_ids=txt_ids,
             y=vec,
             timesteps=t_vec,
             guidance=guidance_vec,
-        )
+            homo_pos_map=coords
+        ).to(img.device)
 
         img = img + (t_prev - t_curr) * pred
 
