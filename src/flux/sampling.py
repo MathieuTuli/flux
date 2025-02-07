@@ -1,5 +1,5 @@
 import math
-from typing import Callable
+from typing import Callable, Tuple, Optional
 
 import numpy as np
 import torch

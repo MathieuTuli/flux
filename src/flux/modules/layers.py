@@ -8,6 +8,56 @@ from torch import Tensor, nn
 from flux.math import attention, rope
 
 
+class SphericalEmbed(nn.Module):
+    def __init__(self, dim: int = 3, theta: int = 10000):
+        """
+        Spherical coordinate embedding layer.
+
+        Args:
+            dim: Output dimension (must be multiple of 3)
+            theta: Base for frequency computation
+        """
+        super().__init__()
+        assert dim % 3 == 0, "Dimension must be multiple of 3 for spherical coordinates"
+        self.dim = dim
+        self.theta = theta
+
+    def forward(self, sphere_coords: Tensor) -> Tensor:
+        """
+        Compute spherical embeddings.
+
+        Args:
+            sphere_coords: Tensor of shape (..., 2) containing (lat, lon) in radians
+
+        Returns:
+            Tensor of shape (..., dim//3, 3) containing rotation components
+        """
+        lat, lon = sphere_coords[..., 0], sphere_coords[..., 1]
+        freq_dim = self.dim // 3
+
+        # Scale dimensions
+        scale = torch.arange(0, freq_dim, dtype=torch.float64,
+                             device=lat.device) / freq_dim
+        omega = 1.0 / (self.theta**scale)
+
+        # Compute scaled positions
+        lat_scaled = torch.einsum('...n,d->...nd', lat, omega)
+        lon_scaled = torch.einsum('...n,d->...nd', lon, omega)
+
+        # Compute trig functions
+        sin_lat = torch.sin(lat_scaled)
+        cos_lat = torch.cos(lat_scaled)
+        sin_lon = torch.sin(lon_scaled)
+        cos_lon = torch.cos(lon_scaled)
+
+        # Stack components for multiplication
+        return torch.stack([
+            cos_lon,            # Component 0
+            -cos_lat * sin_lon,  # Component 1
+            sin_lat * sin_lon   # Component 2
+        ], dim=-1).float()
+
+
 class EmbedND(nn.Module):
     def __init__(self, dim: int, theta: int, axes_dim: list[int]):
         super().__init__()
@@ -16,7 +66,6 @@ class EmbedND(nn.Module):
         self.axes_dim = axes_dim
 
     def forward(self, ids: Tensor) -> Tensor:
-        import pdb; pdb.set_trace()
         n_axes = ids.shape[-1]
         emb = torch.cat(
             [rope(ids[..., i],
@@ -167,7 +216,8 @@ class DoubleStreamBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
 
-    def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(self, img: Tensor, txt: Tensor, vec: Tensor,
+                pe: Tensor, sphere_pe: Tensor | None) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
 
@@ -192,7 +242,7 @@ class DoubleStreamBlock(nn.Module):
         k = torch.cat((txt_k, img_k), dim=2)
         v = torch.cat((txt_v, img_v), dim=2)
 
-        attn = attention(q, k, v, pe=pe)
+        attn = attention(q, k, v, pe=pe, sphere_pe)
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1]:]
 
         # calculate the img bloks
@@ -245,7 +295,8 @@ class SingleStreamBlock(nn.Module):
         self.mlp_act = nn.GELU(approximate="tanh")
         self.modulation = Modulation(hidden_size, double=False)
 
-    def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
+    def forward(self, x: Tensor, vec: Tensor, pe: Tensor,
+                sphere_pe: Tensor | None) -> Tensor:
         mod, _ = self.modulation(vec)
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
         qkv, mlp = torch.split(self.linear1(
@@ -256,7 +307,7 @@ class SingleStreamBlock(nn.Module):
         q, k = self.norm(q, k, v)
 
         # compute attention
-        attn = attention(q, k, v, pe=pe)
+        attn = attention(q, k, v, pe=pe, sphere_pe=sphere_pe)
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         return x + mod.gate * output

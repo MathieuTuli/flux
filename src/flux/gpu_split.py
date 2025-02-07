@@ -1,13 +1,13 @@
-from functools import partial
-import torch
-from torch import nn
-from typing import List, Optional
 from dataclasses import dataclass
+from functools import partial
+
+from torch import nn
+import torch
 
 
 @dataclass
 class GPUSplitConfig:
-    gpu_ids: List[int]
+    gpu_ids: list[int]
     max_params_per_gpu: int
     base_gpu: int = 0  # GPU to place non-distributed components
 
