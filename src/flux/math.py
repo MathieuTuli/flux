@@ -68,34 +68,26 @@ def apply_spherical_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Ten
 
 def apply_quaternion_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
     """
-    Apply quaternion-based rotational position encoding.
+    Apply quaternion-based rope with careful dimension handling.
 
     Args:
         xq: Query tensor of shape (B, H, L, D)
         xk: Key tensor of shape (B, H, L, D)
-        freqs_cis: Quaternion components from QuaternionEmbed of shape (..., 4)
+        freqs_cis: Quaternion components (B, L, D//4, 4)
     """
-    # Get dimensions
-    *_, dim = xq.shape
-    assert dim % 4 == 0, f"Dimension {dim} must be multiple of 4"
-    sections = dim // 4
+    B, H, L, D = xq.shape
+    assert D % 4 == 0, f"Dimension {D} must be multiple of 4"
 
-    # Split tensors into 4-dimensional chunks
-    xq_parts = torch.split(xq, sections, dim=-1)
-    xk_parts = torch.split(xk, sections, dim=-1)
+    # Reshape inputs to apply rotation
+    xq_4d = xq.reshape(B, H, L, D//4, 4)
+    xk_4d = xk.reshape(B, H, L, D//4, 4)
 
-    # Process each section with quaternion rotation
-    xq_out_parts = []
-    xk_out_parts = []
+    # Reshape and expand freqs_cis for broadcasting
+    # From (B, L, 4) to (B, 1, L, 1, 4)
+    freqs_cis = freqs_cis.unsqueeze(1).unsqueeze(3)
 
-    for i in range(4):
-        # Expand frequencies for broadcasting
-        freq = freqs_cis[..., None, i].expand(*xq_parts[i].shape)
-        xq_out_parts.append(freq * xq_parts[i])
-        xk_out_parts.append(freq * xk_parts[i])
-
-    # Combine parts
-    xq_out = torch.cat(xq_out_parts, dim=-1)
-    xk_out = torch.cat(xk_out_parts, dim=-1)
+    # Apply rotation components
+    xq_out = (freqs_cis * xq_4d).reshape(B, H, L, D)
+    xk_out = (freqs_cis * xk_4d).reshape(B, H, L, D)
 
     return xq_out.type_as(xq), xk_out.type_as(xk)
