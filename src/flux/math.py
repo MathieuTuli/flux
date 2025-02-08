@@ -8,7 +8,7 @@ def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor,
     q, k = apply_rope(q, k, pe)
 
     if sphere_pe is not None:
-        q, k = apply_spherical_rope(q, k, sphere_pe)
+        q, k = apply_quaternion_rope(q, k, sphere_pe)
 
     x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
     x = rearrange(x, "B H L D -> B L (H D)")
@@ -46,7 +46,8 @@ def apply_spherical_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Ten
         freqs_cis: Frequency tensor from SphericalEmbed
     """
     # Reshape inputs to match the 3 components
-    import pdb; pdb.set_trace()
+    import pdb
+    pdb.set_trace()
     *_, dim = xq.shape
     dim_per_component = dim // 3
     xq_ = xq.float().reshape(*xq.shape[:-1], 3, dim_per_component)
@@ -56,8 +57,45 @@ def apply_spherical_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Ten
     xq_out = (freqs_cis[..., 0] * xq_[..., 0] +
               freqs_cis[..., 1] * xq_[..., 1] +
               freqs_cis[..., 2] * xq_[..., 2])
-    xq_out = sum([freqs_cis[..., i:i + 1] * xq_[..., i:i+1, :] for i in range(3)])
-    xk_out = sum([freqs_cis[..., i:i + 1] * xk_[..., i:i+1, :] for i in range(3)])
+    xq_out = sum([freqs_cis[..., i:i + 1] * xq_[..., i:i+1, :]
+                 for i in range(3)])
+    xk_out = sum([freqs_cis[..., i:i + 1] * xk_[..., i:i+1, :]
+                 for i in range(3)])
 
     return (xq_out.reshape(*xq.shape).type_as(xq),
             xk_out.reshape(*xk.shape).type_as(xk))
+
+
+def apply_quaternion_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
+    """
+    Apply quaternion-based rotational position encoding.
+
+    Args:
+        xq: Query tensor of shape (B, H, L, D)
+        xk: Key tensor of shape (B, H, L, D)
+        freqs_cis: Quaternion components from QuaternionEmbed of shape (..., 4)
+    """
+    # Get dimensions
+    *_, dim = xq.shape
+    assert dim % 4 == 0, f"Dimension {dim} must be multiple of 4"
+    sections = dim // 4
+
+    # Split tensors into 4-dimensional chunks
+    xq_parts = torch.split(xq, sections, dim=-1)
+    xk_parts = torch.split(xk, sections, dim=-1)
+
+    # Process each section with quaternion rotation
+    xq_out_parts = []
+    xk_out_parts = []
+
+    for i in range(4):
+        # Expand frequencies for broadcasting
+        freq = freqs_cis[..., None, i].expand(*xq_parts[i].shape)
+        xq_out_parts.append(freq * xq_parts[i])
+        xk_out_parts.append(freq * xk_parts[i])
+
+    # Combine parts
+    xq_out = torch.cat(xq_out_parts, dim=-1)
+    xk_out = torch.cat(xk_out_parts, dim=-1)
+
+    return xq_out.type_as(xq), xk_out.type_as(xk)

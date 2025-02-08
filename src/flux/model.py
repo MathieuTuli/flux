@@ -6,7 +6,7 @@ from torch import Tensor, nn
 from flux.modules.layers import (
     DoubleStreamBlock,
     EmbedND,
-    SphericalEmbed,
+    SphericalEmbed, QuaternionEmbed,
     LastLayer,
     MLPEmbedder,
     SingleStreamBlock,
@@ -82,7 +82,7 @@ class Flux(nn.Module):
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
         if True:  # use_spherical_rope:
-            self.sphere_embedder = SphericalEmbed(dim=3, theta=params.theta)
+            self.sphere_embedder = QuaternionEmbed(dim=128, theta=params.theta)
         self.pe_embedder = EmbedND(
             dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
 

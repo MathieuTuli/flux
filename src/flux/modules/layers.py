@@ -8,6 +8,77 @@ from torch import Tensor, nn
 from flux.math import attention, rope
 
 
+class QuaternionEmbed(nn.Module):
+    def __init__(self, dim: int = 128, theta: int = 10000):
+        """
+        Initialize quaternion embedding for rotations.
+        Uses 4 components (w, x, y, z) for quaternion representation.
+
+        Args:
+            dim: Embedding dimension (should be multiple of 4)
+            theta: Base for frequency computation
+        """
+        super().__init__()
+        assert dim % 4 == 0, "Dimension must be multiple of 4 for quaternion encoding"
+        self.dim = dim
+        self.theta = theta
+
+    def forward(self, sphere_coords: Tensor) -> Tensor:
+        """
+        Compute quaternion embeddings from spherical coordinates.
+
+        Args:
+            sphere_coords: Tensor of shape (..., 2) containing (lat, lon) in radians
+
+        Returns:
+            Tensor of shape (..., 4) containing quaternion components (w, x, y, z)
+        """
+        lat, lon = sphere_coords[..., 0], sphere_coords[..., 1]
+        freq_dim = self.dim // 4
+
+        # Scale dimensions for frequency bands
+        scale = torch.arange(0, freq_dim, dtype=torch.float64,
+                             device=lat.device) / freq_dim
+        omega = 1.0 / (self.theta**scale)
+
+        # Compute scaled positions
+        lat_scaled = torch.einsum('...n,d->...nd', lat, omega)
+        lon_scaled = torch.einsum('...n,d->...nd', lon, omega)
+
+        # Convert spherical rotations to quaternions
+        # First, create quaternions for latitude rotation around X axis
+        lat_half = lat_scaled / 2.0
+        sin_lat = torch.sin(lat_half)
+        cos_lat = torch.cos(lat_half)
+        q_lat_w = cos_lat
+        q_lat_x = sin_lat
+        q_lat_y = torch.zeros_like(sin_lat)
+        q_lat_z = torch.zeros_like(sin_lat)
+
+        # Then quaternions for longitude rotation around Y axis
+        lon_half = lon_scaled / 2.0
+        sin_lon = torch.sin(lon_half)
+        cos_lon = torch.cos(lon_half)
+        q_lon_w = cos_lon
+        q_lon_x = torch.zeros_like(sin_lon)
+        q_lon_y = sin_lon
+        q_lon_z = torch.zeros_like(sin_lon)
+
+        # Multiply quaternions to combine rotations
+        # (w1, x1, y1, z1) * (w2, x2, y2, z2)
+        w = q_lon_w * q_lat_w - q_lon_x * q_lat_x - \
+            q_lon_y * q_lat_y - q_lon_z * q_lat_z
+        x = q_lon_w * q_lat_x + q_lon_x * q_lat_w + \
+            q_lon_y * q_lat_z - q_lon_z * q_lat_y
+        y = q_lon_w * q_lat_y - q_lon_x * q_lat_z + \
+            q_lon_y * q_lat_w + q_lon_z * q_lat_x
+        z = q_lon_w * q_lat_z + q_lon_x * q_lat_y - \
+            q_lon_y * q_lat_x + q_lon_z * q_lat_w
+
+        # Stack quaternion components
+        return torch.stack([w, x, y, z], dim=-1).float()
+
+
 class SphericalEmbed(nn.Module):
     def __init__(self, dim: int = 3, theta: int = 10000):
         """
