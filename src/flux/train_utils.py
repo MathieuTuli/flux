@@ -442,10 +442,10 @@ class PanoramaSphereMapper:
         lat, lon = coords[..., 0], coords[..., 1]
 
         # Find nearest latitude and longitude indices
-        lat_idx = torch.searchsorted(self.lat_grid[:, 0], lat[..., None])
+        lat_idx = torch.searchsorted(self.lat_grid[:, 0].contiguous(), lat[..., None].contiguous())
         lat_idx = torch.clamp(lat_idx, 0, self.lat_grid.shape[0] - 1)
 
-        lon_idx = torch.searchsorted(self.lon_grid[0, :], lon[..., None])
+        lon_idx = torch.searchsorted(self.lon_grid[0, :].contiguous(), lon[..., None].contiguous())
         lon_idx = torch.clamp(lon_idx, 0, self.lon_grid.shape[1] - 1)
 
         # Get corresponding coordinates

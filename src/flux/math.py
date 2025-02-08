@@ -84,6 +84,7 @@ def apply_quaternion_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Te
     freqs_cis = freqs_cis.unsqueeze(1).unsqueeze(3)  # (B, 1, L, 1, 4)
 
     # Apply rotation
+    freqs_cis = freqs_cis.to(xq_4d.device)
     xq_out = (xq_4d * freqs_cis).reshape(B, H, L, D)
     xk_out = (xk_4d * freqs_cis).reshape(B, H, L, D)
 

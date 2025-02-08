@@ -24,7 +24,7 @@ from flux.train_utils import (
 
 @dataclass
 class TrainingConfig:
-    outdir = "shapes-with-sphere-pe"
+    outdir = "shapes-without-sphere-pe"
     batch_size: int = 1
     learning_rate: float = 1e-4
     num_epochs: int = 500
@@ -158,7 +158,7 @@ def main():
                 y=inputs["vec"],
                 timesteps=inputs["t"],
                 guidance=guids,
-                sphere_coords=sphere_coords,
+                sphere_coords=None # sphere_coords,
             ).to("cuda:0")
             # pred = unpack(pred, 512, 512).to("cuda:0")
             loss = torch.nn.functional.mse_loss(
