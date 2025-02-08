@@ -46,8 +46,6 @@ def apply_spherical_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Ten
         freqs_cis: Frequency tensor from SphericalEmbed
     """
     # Reshape inputs to match the 3 components
-    import pdb
-    pdb.set_trace()
     *_, dim = xq.shape
     dim_per_component = dim // 3
     xq_ = xq.float().reshape(*xq.shape[:-1], 3, dim_per_component)
@@ -68,26 +66,38 @@ def apply_spherical_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Ten
 
 def apply_quaternion_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
     """
-    Apply quaternion-based rope with careful dimension handling.
+    Apply quaternion-based rope with correct broadcasting.
 
     Args:
         xq: Query tensor of shape (B, H, L, D)
         xk: Key tensor of shape (B, H, L, D)
-        freqs_cis: Quaternion components (B, L, D//4, 4)
+        freqs_cis: Quaternion components (B, L, 4) or (1, L, 4)
     """
     B, H, L, D = xq.shape
     assert D % 4 == 0, f"Dimension {D} must be multiple of 4"
 
-    # Reshape inputs to apply rotation
-    xq_4d = xq.reshape(B, H, L, D//4, 4)
-    xk_4d = xk.reshape(B, H, L, D//4, 4)
+    # Print shapes for debugging
+    print(f"xq shape: {xq.shape}")
+    print(f"freqs_cis shape: {freqs_cis.shape}")
 
-    # Reshape and expand freqs_cis for broadcasting
+    # Ensure freqs_cis has batch dimension
+    if freqs_cis.shape[0] == 1:
+        freqs_cis = freqs_cis.expand(B, -1, -1)
+
+    # Reshape inputs to group dimensions into quaternion components
+    xq_4d = xq.reshape(B, H, L, -1, 4)  # (B, H, L, D//4, 4)
+    xk_4d = xk.reshape(B, H, L, -1, 4)  # (B, H, L, D//4, 4)
+
+    # Expand freqs_cis for broadcasting
     # From (B, L, 4) to (B, 1, L, 1, 4)
     freqs_cis = freqs_cis.unsqueeze(1).unsqueeze(3)
 
-    # Apply rotation components
-    xq_out = (freqs_cis * xq_4d).reshape(B, H, L, D)
-    xk_out = (freqs_cis * xk_4d).reshape(B, H, L, D)
+    # Verify shapes before multiplication
+    print(f"xq_4d shape: {xq_4d.shape}")
+    print(f"freqs_cis expanded shape: {freqs_cis.shape}")
+
+    # Apply rotation components with broadcasting
+    xq_out = (xq_4d * freqs_cis).reshape(B, H, L, D)
+    xk_out = (xk_4d * freqs_cis).reshape(B, H, L, D)
 
     return xq_out.type_as(xq), xk_out.type_as(xk)

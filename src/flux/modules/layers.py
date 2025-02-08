@@ -8,7 +8,7 @@ from torch import Tensor, nn
 from flux.math import attention, rope
 
 
-class QuaternionEmbed(nn.Module):
+class QuaternionEmbed(torch.nn.Module):
     def __init__(self, dim: int = 128, theta: int = 10000):
         super().__init__()
         assert dim % 4 == 0, "Dimension must be multiple of 4 for quaternion encoding"
@@ -16,21 +16,20 @@ class QuaternionEmbed(nn.Module):
         self.theta = theta
 
     def forward(self, sphere_coords: Tensor) -> Tensor:
+        """
+        Generate quaternion frequencies.
+
+        Args:
+            sphere_coords: Tensor of shape (B, L, 2) containing (lat, lon)
+
+        Returns:
+            Tensor of shape (B, L, 4) containing quaternion components
+        """
         lat, lon = sphere_coords[..., 0], sphere_coords[..., 1]
-        freq_dim = self.dim // 4
-
-        # Scale dimensions for frequency bands
-        scale = torch.arange(0, freq_dim, dtype=torch.float64,
-                             device=lat.device) / freq_dim
-        omega = 1.0 / (self.theta**scale)
-
-        # Compute scaled positions
-        lat_scaled = torch.einsum('...n,d->...nd', lat, omega)
-        lon_scaled = torch.einsum('...n,d->...nd', lon, omega)
 
         # Convert to quaternion components
-        lat_half = lat_scaled / 2.0
-        lon_half = lon_scaled / 2.0
+        lat_half = lat / 2.0
+        lon_half = lon / 2.0
 
         sin_lat = torch.sin(lat_half)
         cos_lat = torch.cos(lat_half)
