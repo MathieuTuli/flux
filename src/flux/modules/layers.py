@@ -8,6 +8,22 @@ from torch import Tensor, nn
 from flux.math import attention, rope
 
 
+def compute_sphere_coords_32x32(sphere_coords: Tensor) -> Tensor:
+    """
+    Downsample 256x256 sphere coordinates to 32x32.
+
+    Args:
+        sphere_coords: Tensor of shape (256, 256, 2) containing (lat, lon)
+    Returns:
+        Tensor of shape (32, 32, 2)
+    """
+    # Using adaptive average pooling to downsample
+    coords_flat = sphere_coords.view(1, 2, 256, 256)
+    downsampled = torch.nn.functional.adaptive_avg_pool2d(
+        coords_flat, (32, 32))
+    return downsampled.view(32, 32, 2)
+
+
 class QuaternionEmbed(torch.nn.Module):
     def __init__(self, dim: int = 128, theta: int = 10000):
         super().__init__()
@@ -15,19 +31,24 @@ class QuaternionEmbed(torch.nn.Module):
         self.dim = dim
         self.theta = theta
 
-    def forward(self, sphere_coords: Tensor) -> Tensor:
+    def forward(self, sphere_coords: Tensor, seq_len: int, txt_len: int) -> Tensor:
         """
-        Generate quaternion frequencies.
+        Generate quaternion frequencies with zero rotation for text tokens.
 
         Args:
-            sphere_coords: Tensor of shape (B, L, 2) containing (lat, lon)
+            sphere_coords: Tensor of shape (32, 32, 2) containing (lat, lon)
+            seq_len: Total sequence length (text + image tokens)
+            txt_len: Length of text sequence
 
         Returns:
-            Tensor of shape (B, L, 4) containing quaternion components
+            Tensor of shape (B, seq_len, 4) containing quaternion components
         """
-        lat, lon = sphere_coords[..., 0], sphere_coords[..., 1]
+        # Reshape sphere coordinates to sequence format
+        H, W, _ = sphere_coords.shape
+        coords_seq = sphere_coords.reshape(-1, 2)  # (H*W, 2)
 
-        # Convert to quaternion components
+        # Convert coordinates to quaternions for image tokens
+        lat, lon = coords_seq[..., 0], coords_seq[..., 1]
         lat_half = lat / 2.0
         lon_half = lon / 2.0
 
@@ -42,13 +63,18 @@ class QuaternionEmbed(torch.nn.Module):
         y = cos_lat * sin_lon
         z = sin_lat * sin_lon
 
-        # Stack components and ensure shape is (B, L, 4)
-        quat = torch.stack([w, x, y, z], dim=-1).float()
-        if len(quat.shape) > 3:
-            quat = quat.reshape(quat.shape[0], quat.shape[1], -1, 4)
-            quat = quat.squeeze(-2)
+        # Create quaternions for full sequence
+        quat = torch.zeros(seq_len, 4, device=sphere_coords.device)
 
-        return quat
+        # Set identity quaternion (no rotation) for text tokens
+        quat[:txt_len] = torch.tensor(
+            [1.0, 0.0, 0.0, 0.0], device=sphere_coords.device)
+
+        # Set computed quaternions for image tokens
+        img_quats = torch.stack([w, x, y, z], dim=-1)
+        quat[txt_len:txt_len + H*W] = img_quats
+
+        return quat.unsqueeze(0)  # Add batch dimension
 
 
 class SphericalEmbed(nn.Module):

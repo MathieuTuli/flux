@@ -6,7 +6,7 @@ from torch import Tensor, nn
 from flux.modules.layers import (
     DoubleStreamBlock,
     EmbedND,
-    SphericalEmbed, QuaternionEmbed,
+    SphericalEmbed, QuaternionEmbed, compute_sphere_coords_32x32,
     LastLayer,
     MLPEmbedder,
     SingleStreamBlock,
@@ -149,7 +149,10 @@ class Flux(nn.Module):
         pe = self.pe_embedder(ids)
         sphere_pe = None
         if sphere_coords is not None:
-            sphere_pe = self.sphere_embedder(sphere_coords)
+            sphere_coords = compute_sphere_coords_32x32(sphere_coords)
+            sphere_pe = self.sphere_embedder(sphere_coords,
+                                             seq_len=ids.shape[1],
+                                             txt_len=txt_ids.shape[1])
 
         for block in self.double_blocks:
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe, sphere_pe=sphere_pe)

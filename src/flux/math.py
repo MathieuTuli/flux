@@ -66,45 +66,24 @@ def apply_spherical_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Ten
 
 def apply_quaternion_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
     """
-    Apply quaternion-based rope with careful shape handling.
+    Apply quaternion-based rope with text token handling.
 
     Args:
         xq: Query tensor of shape (B, H, L, D)
         xk: Key tensor of shape (B, H, L, D)
-        freqs_cis: Quaternion components tensor
+        freqs_cis: Quaternion components (B, L, 4)
     """
     B, H, L, D = xq.shape
     assert D % 4 == 0, f"Dimension {D} must be multiple of 4"
 
-    # Debug prints
-    print(f"Input shapes:")
-    print(f"xq: {xq.shape}")
-    print(f"freqs_cis: {freqs_cis.shape}")
-
-    # First ensure freqs_cis is the right shape
-    # If it has extra dimensions, flatten those
-    if len(freqs_cis.shape) > 3:
-        # Reshape to (B, L, 4)
-        freqs_cis = freqs_cis.reshape(
-            freqs_cis.shape[0], freqs_cis.shape[1], -1, 4)
-        # Remove any extra dimension before the quaternion components
-        freqs_cis = freqs_cis.squeeze(-2)
-
-    print(f"Reshaped freqs_cis: {freqs_cis.shape}")
-
-    # Reshape inputs to group dimensions into quaternion components
-    xq_4d = xq.reshape(B, H, L, -1, 4)  # (B, H, L, D//4, 4)
-    xk_4d = xk.reshape(B, H, L, -1, 4)  # (B, H, L, D//4, 4)
+    # Reshape inputs
+    xq_4d = xq.reshape(B, H, L, -1, 4)
+    xk_4d = xk.reshape(B, H, L, -1, 4)
 
     # Expand freqs_cis for broadcasting
-    # From (B, L, 4) to (B, 1, L, 1, 4)
-    freqs_cis = freqs_cis.unsqueeze(1).unsqueeze(3)
+    freqs_cis = freqs_cis.unsqueeze(1).unsqueeze(3)  # (B, 1, L, 1, 4)
 
-    print(f"Final shapes before multiplication:")
-    print(f"xq_4d: {xq_4d.shape}")
-    print(f"freqs_cis: {freqs_cis.shape}")
-
-    # Apply rotation components with broadcasting
+    # Apply rotation
     xq_out = (xq_4d * freqs_cis).reshape(B, H, L, D)
     xk_out = (xk_4d * freqs_cis).reshape(B, H, L, D)
 
