@@ -38,7 +38,7 @@ def wrap_flux_forward(model: nn.Module, base_device: torch.device):
     """Wraps the main Flux model forward to handle initial device placement."""
     orig_forward = model.forward
 
-    def wrapped_forward(img, img_ids, txt, txt_ids, timesteps, y, guidance=None, homo_pos_map=None):
+    def wrapped_forward(img, img_ids, txt, txt_ids, timesteps, y, guidance=None, sphere_coords=None):
         # Ensure inputs are on base device first
         img = img.to(base_device)
         img_ids = img_ids.to(base_device)
@@ -48,8 +48,8 @@ def wrap_flux_forward(model: nn.Module, base_device: torch.device):
         y = y.to(base_device)
         if guidance is not None:
             guidance = guidance.to(base_device)
-        if homo_pos_map is not None:
-            homo_pos_map = homo_pos_map.to(base_device)
+        if sphere_coords is not None:
+            sphere_coords = sphere_coords.to(base_device)
 
         return orig_forward(
             img=img,
@@ -59,7 +59,7 @@ def wrap_flux_forward(model: nn.Module, base_device: torch.device):
             timesteps=timesteps,
             y=y,
             guidance=guidance,
-            homo_pos_map=homo_pos_map
+            sphere_coords=sphere_coords
         )
 
     return wrapped_forward
@@ -69,14 +69,14 @@ def wrap_double_block_forward(block: nn.Module, target_device: torch.device):
     """Wraps DoubleStreamBlock forward to handle device mapping."""
     orig_forward = block.forward
 
-    def wrapped_forward(img, txt, vec, pe):
+    def wrapped_forward(img, txt, vec, pe, sphere_pe):
         # Move inputs to target device
         img = img.to(target_device)
         txt = txt.to(target_device)
         vec = vec.to(target_device)
         pe = pe.to(target_device)
 
-        output_img, output_txt = orig_forward(img=img, txt=txt, vec=vec, pe=pe)
+        output_img, output_txt = orig_forward(img=img, txt=txt, vec=vec, pe=pe, sphere_pe=sphere_pe)
         return output_img, output_txt
 
     return wrapped_forward
@@ -86,13 +86,13 @@ def wrap_single_block_forward(block: nn.Module, target_device: torch.device, is_
     """Wraps SingleStreamBlock forward to handle device mapping."""
     orig_forward = block.forward
 
-    def wrapped_forward(x, vec, pe):
+    def wrapped_forward(x, vec, pe, sphere_pe):
         # Move inputs to target device
         x = x.to(target_device)
         vec = vec.to(target_device)
         pe = pe.to(target_device)
 
-        output = orig_forward(x, vec=vec, pe=pe)
+        output = orig_forward(x, vec=vec, pe=pe, sphere_pe=sphere_pe)
         if is_last and output_device is not None:
             output = output.to(output_device)
         return output
@@ -141,10 +141,7 @@ def new_to_method(self, *args, **kwargs):
     # Move base components to primary GPU
     base_device = torch.device(f"cuda:{self._base_gpu}")
     self.pe_embedder = self.pe_embedder.to(base_device, *args, **kwargs)
-    self.homo_embed_h = nn.Parameter(
-        self.homo_embed_h.to(base_device, *args, **kwargs))
-    self.homo_embed_w = nn.Parameter(
-        self.homo_embed_w.to(base_device, *args, **kwargs))
+    self.sphere_embedder = self.sphere_embedder.to(base_device, *args, **kwargs)
     self.img_in = self.img_in.to(base_device, *args, **kwargs)
     self.time_in = self.time_in.to(base_device, *args, **kwargs)
     self.vector_in = self.vector_in.to(base_device, *args, **kwargs)

@@ -8,6 +8,7 @@ from einops import rearrange, repeat
 from PIL import Image
 
 import numpy as np
+import torchvision
 import random
 import torch
 import math
@@ -60,6 +61,14 @@ class FluxFillDataset(Dataset):
         # REVISIT:
         # - setting rotation to 0 for now
         # - padding? what's that
+
+        self.transform = torchvision.transforms.Compose(
+            [
+                torchvision.transforms.PILToTensor(),
+                torchvision.transforms.ConvertImageDtype(torch.float32),
+                torchvision.transforms.Normalize([0.5], [0.5]),
+            ]
+        )
         self.random_rotate_crop = RandomRotatedCrop(
             crop_size=(512, 512),
             max_rotation=0,
@@ -82,10 +91,11 @@ class FluxFillDataset(Dataset):
         panorama = Image.open(img_path).convert("RGB")
         w, h = panorama.size
         assert w > self.width and h > self.height
-        img = torch.from_numpy(panorama).float() / 127.5 - 1.0
-        img = rearrange(img, "h w c -> c h w")
+        panorama = self.transform(panorama)
+        print(panorama.shape)
+        # panorama = rearrange(panorama, "h w c -> c h w")
 
-        cropped_img, rotation, crop_pos = self.random_rotate_crop(img)
+        cropped_img, rotation, crop_pos = self.random_rotate_crop(panorama)
 
         sphere_coords = self.sphere_mapper.get_coords_for_crop(
             panorama_size=(h, w),
@@ -100,7 +110,7 @@ class FluxFillDataset(Dataset):
         mask = make_rec_mask(cropped_img.unsqueeze(0),
                              resolution=512, times=30).squeeze(0)
 
-        return img, mask, sphere_coords
+        return cropped_img, mask, sphere_coords
 
 
 def make_rec_mask(images, resolution, times=30, drop_mask_prob: float = 0.5):
@@ -457,7 +467,6 @@ def prepare_fill_for_train(
     """
     This will be done, per image
     """
-    B, _, _, _ = img.shape
 
     with torch.no_grad():
         img = img.to(img.device)
@@ -472,6 +481,7 @@ def prepare_fill_for_train(
         mask = rearrange(mask, "b c (h ph) (w pw) -> b (h w) (c ph pw)",
                          ph=2, pw=2)
 
+    B, C, H, W = img.shape
     img = img.to(torch.bfloat16)
     mask_img = mask_img.to(torch.bfloat16)
     img = rearrange(
@@ -488,22 +498,22 @@ def prepare_fill_for_train(
 
     # -- basic prepares
     return_dict = dict()
-    bs, C, H, W = img.shape
+
     img_ids = torch.zeros(H // 2, W // 2, 3)
     img_ids[..., 1] = img_ids[..., 1] + torch.arange(H // 2)[:, None]
     img_ids[..., 2] = img_ids[..., 2] + torch.arange(W // 2)[None, :]
-    img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
+    img_ids = repeat(img_ids, "h w c -> b (h w) c", b=B)
 
     if isinstance(prompt, str):
         prompt = [prompt]
     txt = t5(prompt)
-    if txt.shape[0] == 1 and bs > 1:
-        txt = repeat(txt, "1 ... -> bs ...", bs=bs)
-    txt_ids = torch.zeros(bs, txt.shape[1], 3)
+    if txt.shape[0] == 1 and B > 1:
+        txt = repeat(txt, "1 ... -> B ...", B=B)
+    txt_ids = torch.zeros(B, txt.shape[1], 3)
 
     vec = clip(prompt)
-    if vec.shape[0] == 1 and bs > 1:
-        vec = repeat(vec, "1 ... -> bs ...", bs=bs)
+    if vec.shape[0] == 1 and B > 1:
+        vec = repeat(vec, "1 ... -> B ...", B=B)
 
     return_dict["vec"] = vec.to(img.device)
     return_dict["t"] = t

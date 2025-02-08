@@ -24,11 +24,11 @@ from flux.train_utils import (
 
 @dataclass
 class TrainingConfig:
-    outdir = "lora-overfit-fixed-mask-full-layers"
+    outdir = "shapes-with-sphere-pe"
     batch_size: int = 1
     learning_rate: float = 1e-4
     num_epochs: int = 500
-    save_every: int = 100
+    save_every: int = -1
     num_steps: int = 50
     guidance: float = 1.0
     seed: int = 420
@@ -106,7 +106,7 @@ def main():
     model = split_flux_model_to_gpus(model, gpu_config)
     model = model.to()
 
-    dataset = FluxFillDataset(root="cube-dataset")
+    dataset = FluxFillDataset(root="datasets/shapes")
 
     dataloader = DataLoader(
         dataset,
@@ -120,10 +120,10 @@ def main():
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate)
 
-    path = OptimalTransportPath(sign_min=0)
+    path = OptimalTransportPath(sig_min=0)
 
     # Training loop
-    grad_accum_steps = min(16, len(dataset))
+    grad_accum_steps = min(config.batch_size, len(dataset))
     print("Setting grad accum step:", grad_accum_steps)
     for epoch in range(config.num_epochs):
         model.train()
@@ -158,7 +158,7 @@ def main():
                 y=inputs["vec"],
                 timesteps=inputs["t"],
                 guidance=guids,
-                homo_pos_map=sphere_coords,
+                sphere_coords=sphere_coords,
             ).to("cuda:0")
             # pred = unpack(pred, 512, 512).to("cuda:0")
             loss = torch.nn.functional.mse_loss(
@@ -179,7 +179,7 @@ def main():
         print(
             f"Epoch {epoch+1}/{config.num_epochs}, Loss: {epoch_loss/len(dataloader):.4f}")
 
-        if (epoch + 1) % config.save_every == 0:
+        if config.save_every > 0 and (epoch + 1) % config.save_every == 0:
             # torch.save(
             #     model.state_dict(),
             #     f"lora_checkpoint_epoch_{epoch+1}.safetensors"
@@ -188,7 +188,7 @@ def main():
             lora_dict = {k: sd[k] for k in sd.keys() if "lora_" in k}
             save_file(model.state_dict(), config.outdir /
                       f"lora_checkpoint_epoch_{epoch+1}.safetensors")
-    save_file(model.state_dict(), config.outdir / "lora_done.safetensors")
+    save_file(model.state_dict(), config.outdir / "lora_last.safetensors")
 
 
 if __name__ == "__main__":

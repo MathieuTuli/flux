@@ -46,17 +46,18 @@ def apply_spherical_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Ten
         freqs_cis: Frequency tensor from SphericalEmbed
     """
     # Reshape inputs to match the 3 components
-    xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 3)
-    xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 3)
+    import pdb; pdb.set_trace()
+    *_, dim = xq.shape
+    dim_per_component = dim // 3
+    xq_ = xq.float().reshape(*xq.shape[:-1], 3, dim_per_component)
+    xk_ = xk.float().reshape(*xk.shape[:-1], 3, dim_per_component)
 
     # Apply components similar to RoPE
     xq_out = (freqs_cis[..., 0] * xq_[..., 0] +
               freqs_cis[..., 1] * xq_[..., 1] +
               freqs_cis[..., 2] * xq_[..., 2])
-
-    xk_out = (freqs_cis[..., 0] * xk_[..., 0] +
-              freqs_cis[..., 1] * xk_[..., 1] +
-              freqs_cis[..., 2] * xk_[..., 2])
+    xq_out = sum([freqs_cis[..., i:i + 1] * xq_[..., i:i+1, :] for i in range(3)])
+    xk_out = sum([freqs_cis[..., i:i + 1] * xk_[..., i:i+1, :] for i in range(3)])
 
     return (xq_out.reshape(*xq.shape).type_as(xq),
             xk_out.reshape(*xk.shape).type_as(xk))

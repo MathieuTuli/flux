@@ -76,8 +76,6 @@ class Flux(nn.Module):
                 f"Hidden size {params.hidden_size} must be divisible by num_heads {params.num_heads}"
             )
         pe_dim = params.hidden_size // params.num_heads
-        import pdb
-        pdb.set_trace()
         if sum(params.axes_dim) != pe_dim:
             raise ValueError(
                 f"Got {params.axes_dim} but expected positional dim {pe_dim}")
@@ -148,10 +146,10 @@ class Flux(nn.Module):
         txt = self.txt_in(txt)
 
         ids = torch.cat((txt_ids, img_ids), dim=1)
+        pe = self.pe_embedder(ids)
         sphere_pe = None
         if sphere_coords is not None:
             sphere_pe = self.sphere_embedder(sphere_coords)
-        pe = self.pe_embedder(ids)
 
         for block in self.double_blocks:
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe, sphere_pe=sphere_pe)
