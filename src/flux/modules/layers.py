@@ -42,8 +42,13 @@ class QuaternionEmbed(torch.nn.Module):
         y = cos_lat * sin_lon
         z = sin_lat * sin_lon
 
-        # Stack components
-        return torch.stack([w, x, y, z], dim=-1).float()
+        # Stack components and ensure shape is (B, L, 4)
+        quat = torch.stack([w, x, y, z], dim=-1).float()
+        if len(quat.shape) > 3:
+            quat = quat.reshape(quat.shape[0], quat.shape[1], -1, 4)
+            quat = quat.squeeze(-2)
+
+        return quat
 
 
 class SphericalEmbed(nn.Module):
