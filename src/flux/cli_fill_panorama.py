@@ -28,21 +28,13 @@ class CropInfo:
     sphere_coords: torch.Tensor    # Spherical coordinates for this crop
 
 
-class GridWindowCrop:
+class OrderedGridWindowCrop:
     def __init__(
         self,
         crop_size: tuple[int, int],
         stride: tuple[int, int] | None = None,  # If None, use crop_size//2
         padding: int | tuple[int, int] = 0
     ):
-        """
-        Grid-based window cropping.
-
-        Args:
-            crop_size: Size of crop (H, W)
-            stride: Size of grid stride (H, W). If None, uses crop_size//2
-            padding: Padding to avoid edge effects
-        """
         self.crop_size = crop_size
         self.stride = stride or (crop_size[0]//2, crop_size[1]//2)
         if isinstance(padding, int):
@@ -50,8 +42,11 @@ class GridWindowCrop:
         else:
             self.padding = padding
 
-        # Initialize grid positions
-        self.available_positions = []
+        # Initialize position tracking
+        self.current_row = 0
+        self.current_col = 0
+        self.y_positions = []
+        self.x_positions = []
         self.current_image_size = None
 
     def _init_grid(self, img_size: tuple[int, int]):
@@ -62,70 +57,125 @@ class GridWindowCrop:
         pad_y, pad_x = self.padding
 
         # Calculate valid start positions
-        y_positions = list(range(
+        self.y_positions = list(range(
             pad_y,
             H - crop_h - pad_y,
             stride_h
         ))
-        x_positions = list(range(
+        self.x_positions = list(range(
             pad_x,
             W - crop_w - pad_x,
             stride_w
         ))
 
-        # Create all grid positions
-        self.available_positions = [
-            (y, x) for y in y_positions for x in x_positions
-        ]
-
-        # Shuffle positions for random sampling
-        torch.manual_seed(torch.randint(0, 2**32, (1,)).item())
-        torch.randperm(len(self.available_positions))
-
+        self.current_row = 0
+        self.current_col = 0
         self.current_image_size = img_size
 
-    def get_next_window(self, img_size: tuple[int, int]) -> tuple[int, int]:
+        print(
+            f"Grid initialized with {len(self.y_positions)} rows and {len(self.x_positions)} columns")
+
+    def get_next_window(self, img_size: tuple[int, int]) -> tuple[int, int] | None:
         """Get next window position from the grid."""
-        # Initialize or reinitialize grid if needed
-        if self.current_image_size != img_size or not self.available_positions:
+        if self.current_image_size != img_size:
             self._init_grid(img_size)
 
-        # Get next position from grid
-        return self.available_positions.pop()
+        if self.current_row >= len(self.y_positions):
+            return None
 
-    def __call__(self, img: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
+        y = self.y_positions[self.current_row]
+        x = self.x_positions[self.current_col]
+
+        return (y, x)
+
+    def get_position_info(self) -> tuple[int, int, bool, bool]:
+        """
+        Get information about current position.
+        Returns:
+            tuple containing:
+            - current row
+            - current column
+            - whether this is first crop in first row
+            - whether this is first row
+        """
+        is_first_crop = self.current_row == 0 and self.current_col == 0
+        is_first_row = self.current_row == 0
+        return self.current_row, self.current_col, is_first_crop, is_first_row
+
+    def advance_position(self):
+        """Advance to next position."""
+        self.current_col += 1
+        if self.current_col >= len(self.x_positions):
+            self.current_col = 0
+            self.current_row += 1
+
+    def __call__(self, img: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int], dict] | None:
         """
         Extract the next window from the grid.
 
-        Args:
-            img: Input image tensor (C, H, W)
-
         Returns:
             tuple of:
-                - Cropped image tensor (C, crop_H, crop_W)
+                - Cropped image tensor
                 - Window position
+                - Position info dictionary
+            or None if done
         """
-        H, W = img.shape[-2:]
-        crop_pos = self.get_next_window((H, W))
+        next_pos = self.get_next_window(img.shape[-2:])
+        if next_pos is None:
+            return None
 
-        # Extract window without any rotation
-        crop_y, crop_x = crop_pos
+        # Extract window
+        crop_y, crop_x = next_pos
         crop_h, crop_w = self.crop_size
         window = img[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
 
-        return window, crop_pos
+        # Get position info
+        row, col, is_first_crop, is_first_row = self.get_position_info()
+        position_info = {
+            'row': row,
+            'col': col,
+            'is_first_crop': is_first_crop,
+            'is_first_row': is_first_row
+        }
+
+        # Advance position for next call
+        self.advance_position()
+
+        return window, next_pos, position_info
+
+
+def create_progressive_mask(crop_size: tuple[int, int], is_first_crop: bool, is_first_row: bool) -> torch.Tensor:
+    """
+    Create appropriate mask based on position:
+    - First crop: No mask (all zeros)
+    - First row: Right 50% masked
+    - Other rows: Bottom 50% masked
+
+    Returns:
+        Tensor of shape (1, H, W) where 1 indicates areas to generate
+    """
+    H, W = crop_size
+    mask = torch.zeros((1, H, W))
+
+    if is_first_crop:
+        return mask
+
+    if is_first_row:
+        # Mask right half
+        mask[..., :, W//2:] = 1
+    else:
+        # Mask bottom half
+        mask[..., H//2:, :] = 1
+
+    return mask
 
 
 class PanoramaInfiller:
     def __init__(self,
                  panorama_path: str,
                  output_dir: str,
-                 crop_size: int = 512,
-                 overlap: float = 0.5):
-        """
-        Initialize panorama infiller.
-        """
-        # Setup transform to match dataloader
+                 crop_size: int = 512):
+        """Initialize panorama infiller."""
         self.transform = torchvision.transforms.Compose([
             torchvision.transforms.PILToTensor(),
             torchvision.transforms.ConvertImageDtype(torch.float32),
@@ -137,98 +187,106 @@ class PanoramaInfiller:
         self.width, self.height = self.panorama_pil.size
         self.panorama = self.transform(self.panorama_pil)
 
-        self.crop_size = crop_size
-        self.overlap = overlap
-        self.stride = int(crop_size * (1 - overlap))
-
-        # Setup output directory
+        # Setup output directory structure
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         self.temp_dir = os.path.join(output_dir, "temp")
+        self.crops_dir = os.path.join(output_dir, "crops")
         os.makedirs(self.temp_dir, exist_ok=True)
+        os.makedirs(self.crops_dir, exist_ok=True)
 
-        self.window_crop = GridWindowCrop(
+        # Initialize components
+        self.window_crop = OrderedGridWindowCrop(
             crop_size=(crop_size, crop_size),
-            stride=(crop_size//2, crop_size//2),  # 50% overlap
+            stride=(crop_size//2, crop_size//2),
             padding=64
         )
-
-        # Initialize result buffer
-        self.result = Image.new('RGB', (self.width, self.height))
 
         self.sphere_mapper = PanoramaSphereMapper(
             SphereConfig(patch_size=2, target_size=(512, 512))
         )
+
+        # Initialize result buffer
+        self.result = Image.new('RGB', (self.width, self.height))
 
         # Save paths for temporary files
         self.temp_cond_path = os.path.join(self.temp_dir, "temp_cond.png")
         self.temp_mask_path = os.path.join(self.temp_dir, "temp_mask.png")
 
     def get_next_crop(self) -> Tuple[CropInfo, str, str] | None:
-        """
-        Get next window to process.
-        Returns (CropInfo, conditioning_path, mask_path) or None when done.
-        """
-        try:
-            # Get next window and its position
-            cropped_img, crop_pos = self.window_crop(self.panorama)
-            rotation = 0  # No rotation
-
-            # Get sphere coordinates
-            sphere_coords = self.sphere_mapper.get_coords_for_crop(
-                panorama_size=(self.height, self.width),
-                crop_size=(512, 512),
-                crop_position=crop_pos,
-                rotation=rotation
-            )
-
-            # Get nearest sphere patches
-            sphere_coords = self.sphere_mapper.get_nearest_sphere_patches(
-                sphere_coords)
-
-            # Convert tensor to PIL for saving
-            conditioning = torchvision.transforms.ToPILImage()(cropped_img)
-            conditioning.save(self.temp_cond_path)
-
-            # Create and save mask
-            mask = make_rec_mask(cropped_img.unsqueeze(0),
-                                 resolution=512, times=30).squeeze(0)
-            mask_pil = torchvision.transforms.ToPILImage()(mask)
-            mask_pil.save(self.temp_mask_path)
-
-            crop_info = CropInfo(
-                position=crop_pos,
-                conditioning=conditioning,
-                mask=mask_pil,
-                sphere_coords=sphere_coords
-            )
-
-            return crop_info, self.temp_cond_path, self.temp_mask_path
-
-        except IndexError:
-            # No more windows available
+        """Get next window to process."""
+        next_window = self.window_crop(self.panorama)
+        if next_window is None:
             return None
+
+        cropped_img, crop_pos, position_info = next_window
+        rotation = 0  # No rotation
+
+        # Get sphere coordinates
+        sphere_coords = self.sphere_mapper.get_coords_for_crop(
+            panorama_size=(self.height, self.width),
+            crop_size=(512, 512),
+            crop_position=crop_pos,
+            rotation=rotation
+        )
+        sphere_coords = self.sphere_mapper.get_nearest_sphere_patches(
+            sphere_coords)
+
+        # Convert tensor to PIL for saving
+        conditioning = torchvision.transforms.ToPILImage()(cropped_img)
+        conditioning.save(self.temp_cond_path)
+
+        # Create appropriate mask based on position
+        mask = create_progressive_mask(
+            (512, 512),
+            position_info['is_first_crop'],
+            position_info['is_first_row']
+        )
+
+        # Convert mask to PIL and save
+        mask_pil = Image.fromarray(
+            (mask.squeeze(0).numpy() * 255).astype(np.uint8))
+        mask_pil.save(self.temp_mask_path)
+
+        crop_info = CropInfo(
+            position=crop_pos,
+            conditioning=conditioning,
+            mask=mask_pil,
+            sphere_coords=sphere_coords
+        )
+
+        print(
+            f"Processing window at row {position_info['row']}, col {position_info['col']}")
+        print(
+            f"First crop: {position_info['is_first_crop']}, First row: {position_info['is_first_row']}")
+
+        return crop_info, self.temp_cond_path, self.temp_mask_path
 
     def update_result(self, crop_info: CropInfo, generated_image: Image.Image):
         """Update result buffer with newly generated image."""
         y, x = crop_info.position
         mask = np.array(crop_info.mask) / 255.0
 
-        # Convert to numpy for easier manipulation
-        crop_size = (512, 512)  # Assuming 512x512 crops
+        # Update full panorama
+        crop_size = (512, 512)
         existing = np.array(self.result.crop(
             (x, y, x + crop_size[0], y + crop_size[1])))
         new = np.array(generated_image)
 
+        mask = mask[..., np.newaxis]
         blended = existing * (1 - mask) + new * mask
 
-        blended = torchvision.transforms.ToPILImage()(blended)
-        self.result.paste(blended, (x, y))
+        self.result.paste(Image.fromarray(blended.astype(np.uint8)), (x, y))
 
-        # Save intermediate result
-        window_idx = len(self.window_crop.available_positions)
+        # Save individual crop
+        row = y // (crop_size[0]//2)
+        col = x // (crop_size[1]//2)
+        crop_path = os.path.join(self.crops_dir, f"crop_row{row}_col{col}.png")
+        generated_image.save(crop_path)
+
+        # Save intermediate panorama
         self.save_result(os.path.join(
-            self.output_dir, f"result_window_{window_idx}.png"))
+            self.output_dir, f"panorama_row{row}_col{col}.png"))
 
     def save_result(self, path: str):
         """Save current result."""
@@ -326,7 +384,8 @@ def main(
             )
 
             # Add sphere coordinates
-            inp["sphere_coords"] = crop_info.sphere_coords.unsqueeze(0).to(x.device)
+            inp["sphere_coords"] = crop_info.sphere_coords.unsqueeze(
+                0).to(x.device)
 
             # Generate
             timesteps = get_schedule(num_steps, inp["img"].shape[1])
@@ -336,7 +395,8 @@ def main(
                 generated = ae.decode(x)
 
             # Convert and update
-            generated_image = torchvision.transforms.ToPILImage()(generated.squeeze(0).cpu().float())
+            generated_image = torchvision.transforms.ToPILImage()(
+                generated.squeeze(0).cpu().float())
             infiller.update_result(crop_info, generated_image)
 
         # Save final result
