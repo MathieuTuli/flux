@@ -193,7 +193,7 @@ class PanoramaInfiller:
             # Create and save mask
             mask = make_rec_mask(cropped_img.unsqueeze(0),
                                  resolution=512, times=30).squeeze(0)
-            mask_pil = Image.fromarray((mask.numpy() * 255).astype(np.uint8))
+            mask_pil = torchvision.transforms.ToPILImage()(mask)
             mask_pil.save(self.temp_mask_path)
 
             crop_info = CropInfo(
@@ -220,10 +220,10 @@ class PanoramaInfiller:
             (x, y, x + crop_size[0], y + crop_size[1])))
         new = np.array(generated_image)
 
-        mask = mask[..., np.newaxis]
         blended = existing * (1 - mask) + new * mask
 
-        self.result.paste(Image.fromarray(blended.astype(np.uint8)), (x, y))
+        blended = torchvision.transforms.ToPILImage()(blended)
+        self.result.paste(blended, (x, y))
 
         # Save intermediate result
         window_idx = len(self.window_crop.available_positions)
@@ -254,7 +254,7 @@ def main(
     device: str = "cuda",
     num_steps: int = 50,
     guidance: float = 30.0,
-    seed: int | None = None,
+    seed: int | None = 420,
 ):
     torch_device = torch.device(device)
     name = "flux-dev-fill"
@@ -297,7 +297,7 @@ def main(
 
     # Initialize infiller
     output_dir = os.path.dirname(output_path)
-    infiller = PanoramaInfiller(panorama_path, output_dir, patch_size=2)
+    infiller = PanoramaInfiller(panorama_path, output_dir)
 
     try:
         while (next_crop := infiller.get_next_crop()) is not None:
@@ -326,7 +326,7 @@ def main(
             )
 
             # Add sphere coordinates
-            inp["coords"] = crop_info.sphere_coords.unsqueeze(0).to(x.device)
+            inp["sphere_coords"] = crop_info.sphere_coords.unsqueeze(0).to(x.device)
 
             # Generate
             timesteps = get_schedule(num_steps, inp["img"].shape[1])
@@ -336,7 +336,7 @@ def main(
                 generated = ae.decode(x)
 
             # Convert and update
-            generated_image = torchvision.transforms.ToPILImage()(generated.squeeze(0).cpu())
+            generated_image = torchvision.transforms.ToPILImage()(generated.squeeze(0).cpu().float())
             infiller.update_result(crop_info, generated_image)
 
         # Save final result

@@ -255,7 +255,7 @@ def denoise(
     guidance: float = 4.0,
     # extra img tokens
     img_cond: Tensor | None = None,
-    coords: Tensor = None
+    sphere_coords: Tensor = None
 ):
     # this is ignored for schnell
     guidance_vec = torch.full(
@@ -272,7 +272,7 @@ def denoise(
             y=vec,
             timesteps=t_vec,
             guidance=guidance_vec,
-            homo_pos_map=coords
+            sphere_coords=sphere_coords
         ).to(img.device)
 
         img = img + (t_prev - t_curr) * pred
