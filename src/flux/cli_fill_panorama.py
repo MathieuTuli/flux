@@ -17,7 +17,7 @@ from flux.util import (
     save_image
 )
 from flux.gpu_split import split_flux_model_to_gpus, GPUSplitConfig
-from flux.train_utils import PanoramaSphereMapper, SphereConfig
+from flux.train_utils import PanoramaSphereMapper, SphereConfig, make_rec_mask
 
 
 @dataclass
@@ -114,67 +114,6 @@ class GridWindowCrop:
         window = img[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
 
         return window, crop_pos
-
-# In your FluxFillDataset:
-
-
-class FluxFillDataset(Dataset):
-    def __init__(self,
-                 root: Path | str,
-                 prompt: str = "a photo of sks",
-                 height: int = 512,
-                 width: int = 512):
-        root = root if isinstance(root, Path) else Path(root)
-        self.image_paths = [f for f in root.iterdir()]
-        self.prompt = prompt
-        self.height = height
-        self.width = width
-
-        self.transform = torchvision.transforms.Compose([
-            torchvision.transforms.PILToTensor(),
-            torchvision.transforms.ConvertImageDtype(torch.float32),
-            torchvision.transforms.Normalize([0.5], [0.5]),
-        ])
-
-        # Replace RandomRotatedCrop with GridWindowCrop
-        self.window_crop = GridWindowCrop(
-            crop_size=(512, 512),
-            stride=(256, 256),  # Half the crop size for 50% overlap
-            padding=64
-        )
-
-        self.sphere_mapper = PanoramaSphereMapper(
-            SphereConfig(patch_size=2, target_size=(512, 512))
-        )
-
-    def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        panorama = Image.open(img_path).convert("RGB")
-        w, h = panorama.size
-        assert w > self.width and h > self.height
-        panorama = self.transform(panorama)
-
-        # Get next window crop without rotation
-        cropped_img, crop_pos = self.window_crop(panorama)
-        rotation = 0  # No rotation
-
-        # Get sphere coordinates for this window
-        sphere_coords = self.sphere_mapper.get_coords_for_crop(
-            panorama_size=(h, w),
-            crop_size=(512, 512),
-            crop_position=crop_pos,
-            rotation=rotation
-        )
-
-        # Get nearest sphere patches
-        sphere_coords = self.sphere_mapper.get_nearest_sphere_patches(
-            sphere_coords)
-
-        # Create mask
-        mask = make_rec_mask(cropped_img.unsqueeze(0),
-                             resolution=512, times=30).squeeze(0)
-
-        return cropped_img, mask, sphere_coords
 
 
 class PanoramaInfiller:
