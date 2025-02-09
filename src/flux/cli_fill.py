@@ -10,7 +10,14 @@ from PIL import Image
 from transformers import pipeline
 
 from flux.sampling import denoise, get_noise, get_schedule, prepare_fill, unpack
-from flux.util import configs, load_ae, load_clip, load_flow_model, load_t5, save_image
+from flux.util import (
+    configs,
+    load_ae,
+    load_clip,
+    load_flow_model,
+    load_t5,
+    save_image
+)
 
 from flux_splitter import split_flux_model_to_gpus, GPUSplitConfig
 
@@ -250,7 +257,7 @@ def main(
     replace_linear_with_lora(model, lora_rank, lora_scale, recursive=True)
     # ckpt_path = configs[name].ckpt_path
     # lora_done.safetensors"
-    ckpt_path = "lora-overfit-fixed-mask-full-layers/lora_checkpoint_epoch_200.safetensors"
+    ckpt_path = "shapes-with-sphere-pe/lora_last.safetensors"
     if ckpt_path is not None:
         print("Loading checkpoint")
         # load_sft doesn't support torch.device
@@ -334,7 +341,7 @@ def main(
             model = model.to(torch_device)
 
         x = 1
-        inp["coords"] = None # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
+        inp["coords"] = None  # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
         # denoise initial noise
         x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
 
