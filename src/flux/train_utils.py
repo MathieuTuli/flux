@@ -69,8 +69,14 @@ class FluxFillDataset(Dataset):
                 torchvision.transforms.Normalize([0.5], [0.5]),
             ]
         )
-        self.random_rotate_crop = RandomRotatedCrop(
+        # self.random_rotate_crop = RandomRotatedCrop(
+        #     crop_size=(512, 512),
+        #     max_rotation=0,
+        #     padding=64
+        # )
+        self.random_rotate_crop = GridRotatedCrop(
             crop_size=(512, 512),
+            stride=(256, 256),
             max_rotation=0,
             padding=64
         )
@@ -105,7 +111,8 @@ class FluxFillDataset(Dataset):
         )
 
         # Compute spherical coordinates for the patches
-        sphere_coords = self.sphere_mapper.get_nearest_sphere_patches(sphere_coords)
+        sphere_coords = self.sphere_mapper.get_nearest_sphere_patches(
+            sphere_coords)
 
         mask = make_rec_mask(cropped_img.unsqueeze(0),
                              resolution=512, times=30).squeeze(0)
@@ -253,6 +260,106 @@ def apply_rotated_crop(
     )
 
     return out
+
+
+class GridRotatedCrop:
+    def __init__(
+        self,
+        crop_size: tuple[int, int],
+        stride: tuple[int, int] | None = None,  # If None, use crop_size//2
+        max_rotation: float = 180.0,
+        padding: int | tuple[int, int] = 0
+    ):
+        """
+        Grid-based random rotation and crop transformation.
+
+        Args:
+            crop_size: Size of crop (H, W)
+            stride: Size of grid stride (H, W). If None, uses crop_size//2
+            max_rotation: Maximum rotation in degrees
+            padding: Padding to apply to avoid empty regions after rotation
+        """
+        self.crop_size = crop_size
+        self.stride = stride or (crop_size[0]//2, crop_size[1]//2)
+        self.max_rotation = max_rotation
+        if isinstance(padding, int):
+            self.padding = (padding, padding)
+        else:
+            self.padding = padding
+
+        # Initialize grid positions
+        self.available_positions = []
+        self.current_image_size = None
+
+    def _init_grid(self, img_size: tuple[int, int]):
+        """Initialize grid positions for a given image size."""
+        H, W = img_size
+        crop_h, crop_w = self.crop_size
+        stride_h, stride_w = self.stride
+        pad_y, pad_x = self.padding
+
+        # Calculate valid start positions
+        y_positions = list(range(
+            pad_y,
+            H - crop_h - pad_y,
+            stride_h
+        ))
+        x_positions = list(range(
+            pad_x,
+            W - crop_w - pad_x,
+            stride_w
+        ))
+
+        # Create all grid positions
+        self.available_positions = [
+            (y, x) for y in y_positions for x in x_positions
+        ]
+
+        # Shuffle positions
+        torch.manual_seed(torch.randint(0, 2**32, (1,)).item())
+        torch.randperm(len(self.available_positions))
+
+        self.current_image_size = img_size
+
+    def get_params(self, img_size: tuple[int, int]) -> tuple[float, tuple[int, int]]:
+        """Get random rotation and next grid position."""
+        # Initialize or reinitialize grid if needed
+        if self.current_image_size != img_size or not self.available_positions:
+            self._init_grid(img_size)
+
+        # Get next position from grid
+        crop_pos = self.available_positions.pop()
+
+        # Random rotation
+        rotation = torch.rand(1).item() * 2 * \
+            self.max_rotation - self.max_rotation
+
+        return rotation, crop_pos
+
+    def __call__(self, img: torch.Tensor) -> tuple[torch.Tensor, float, tuple[int, int]]:
+        """
+        Apply random rotation and grid-based crop.
+
+        Args:
+            img: Input image tensor (C, H, W)
+
+        Returns:
+            tuple of:
+                - Transformed image tensor (C, crop_H, crop_W)
+                - Rotation angle
+                - Crop position
+        """
+        H, W = img.shape[-2:]
+        rotation, crop_pos = self.get_params((H, W))
+
+        transformed = apply_rotated_crop(
+            img,
+            self.crop_size,
+            rotation,
+            crop_pos
+        )
+
+        return transformed.squeeze(0), rotation, crop_pos
 
 
 class RandomRotatedCrop:
@@ -442,10 +549,12 @@ class PanoramaSphereMapper:
         lat, lon = coords[..., 0], coords[..., 1]
 
         # Find nearest latitude and longitude indices
-        lat_idx = torch.searchsorted(self.lat_grid[:, 0].contiguous(), lat[..., None].contiguous())
+        lat_idx = torch.searchsorted(
+            self.lat_grid[:, 0].contiguous(), lat[..., None].contiguous())
         lat_idx = torch.clamp(lat_idx, 0, self.lat_grid.shape[0] - 1)
 
-        lon_idx = torch.searchsorted(self.lon_grid[0, :].contiguous(), lon[..., None].contiguous())
+        lon_idx = torch.searchsorted(
+            self.lon_grid[0, :].contiguous(), lon[..., None].contiguous())
         lon_idx = torch.clamp(lon_idx, 0, self.lon_grid.shape[1] - 1)
 
         # Get corresponding coordinates
