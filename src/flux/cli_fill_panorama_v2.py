@@ -146,7 +146,8 @@ def main(
             else:
                 img_mask_path = "bottom_mask.png"
 
-            box = (xpos, ypos, xpos + crop_size[0], ypos + crop_size[1])
+            box = (xpos.item(), ypos.item(),
+                   xpos.item() + crop_size[0], ypos.item() + crop_size[1])
             crop = panorama_pil.crop(box)
             img_cond_path = os.path.join(output_dir, f"img_cond_{idx}.png")
             output_name = os.path.join(output_dir, f"img_pred_{idx}.png")
