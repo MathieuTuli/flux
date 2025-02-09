@@ -19,7 +19,7 @@ from flux.util import (
     save_image
 )
 
-from flux_splitter import split_flux_model_to_gpus, GPUSplitConfig
+from flux.gpu_split import split_flux_model_to_gpus, GPUSplitConfig
 
 
 @dataclass
@@ -268,10 +268,12 @@ def main(
             sd, strict=False, assign=True)
         print_load_warning(missing, unexpected)
 
+    ids = [1, 2, 3, 4, 5] if torch.cuda.device_count() > 1 else [0]
+    base_id = 1 if torch.cuda.device_count() > 1 else 0
     gpu_config = GPUSplitConfig(
-        gpu_ids=[1, 2, 3, 4, 5],  # List of GPU IDs to use
+        gpu_ids=ids,
         max_params_per_gpu=5e9,  # Maximum parameters per GPU
-        base_gpu=1  # GPU to place non-distributed components
+        base_gpu=base_id
     )
     model = split_flux_model_to_gpus(model, gpu_config)
     model = model.to()
@@ -341,7 +343,7 @@ def main(
             model = model.to(torch_device)
 
         x = 1
-        inp["coords"] = None  # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
+        inp["sphere_coords"] = None  # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
         # denoise initial noise
         x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
 
