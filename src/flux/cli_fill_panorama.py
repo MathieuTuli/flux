@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+from einops import rearrange
 from PIL import Image
 from dataclasses import dataclass
 from typing import Iterator, Tuple
@@ -26,6 +27,16 @@ class CropInfo:
     conditioning: Image.Image       # 512x512 crop from previous generation
     mask: Image.Image              # Mask where 1 is area to generate
     sphere_coords: torch.Tensor    # Spherical coordinates for this crop
+
+
+def save_image(
+    output_name: str,
+    x: torch.Tensor,
+) -> int:
+    x = x.clamp(-1, 1)
+    x = rearrange(x[0], "c h w -> h w c")
+    img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
+    img.save(output_name)
 
 
 class OrderedGridWindowCrop:
@@ -234,6 +245,7 @@ class PanoramaInfiller:
 
         # Convert tensor to PIL for saving
         conditioning = torchvision.transforms.ToPILImage()(cropped_img)
+
         conditioning.save(self.temp_cond_path)
 
         # Create appropriate mask based on position
@@ -264,12 +276,22 @@ class PanoramaInfiller:
 
     def update_result(self, crop_info: CropInfo, generated_image: Image.Image):
         """Update result buffer with newly generated image."""
+<<<<<<< HEAD
         import pdb; pdb.set_trace()
+||||||| 756a983
+=======
+        # Save individual crop
+        crop_size = (512, 512)
+>>>>>>> fe0d795a52cd4d1905382a0b6ac7fd8caaf1f109
         y, x = crop_info.position
+        row = y // (crop_size[0]//2)
+        col = x // (crop_size[1]//2)
+        crop_path = os.path.join(self.crops_dir, f"crop_row{row}_col{col}.png")
+        save_image(crop_path, generated_image)
+
         mask = np.array(crop_info.mask) / 255.0
 
         # Update full panorama
-        crop_size = (512, 512)
         existing = np.array(self.result.crop(
             (x, y, x + crop_size[0], y + crop_size[1])))
         new = np.array(generated_image)
@@ -278,12 +300,6 @@ class PanoramaInfiller:
         blended = existing * (1 - mask) + new * mask
 
         self.result.paste(Image.fromarray(blended.astype(np.uint8)), (x, y))
-
-        # Save individual crop
-        row = y // (crop_size[0]//2)
-        col = x // (crop_size[1]//2)
-        crop_path = os.path.join(self.crops_dir, f"crop_row{row}_col{col}.png")
-        generated_image.save(crop_path)
 
         # Save intermediate panorama
         self.save_result(os.path.join(
@@ -344,10 +360,12 @@ def main(
             sd, strict=False, assign=True)
         print_load_warning(missing, unexpected)
 
+    ids = [1, 2, 3, 4, 5] if torch.cuda.device_count() > 1 else [0]
+    base_id = 1 if torch.cuda.device_count() > 1 else 0
     gpu_config = GPUSplitConfig(
-        gpu_ids=[1, 2, 3, 4, 5],  # List of GPU IDs to use
+        gpu_ids=ids,
         max_params_per_gpu=5e9,  # Maximum parameters per GPU
-        base_gpu=1  # GPU to place non-distributed components
+        base_gpu=base_id
     )
     model = split_flux_model_to_gpus(model, gpu_config)
     model = model.to()
