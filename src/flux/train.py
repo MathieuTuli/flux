@@ -24,7 +24,7 @@ from flux.train_utils import (
 
 @dataclass
 class TrainingConfig:
-    outdir = "shapes-without-sphere-pe"
+    outdir = "shapes-no-sphere-pe"
     batch_size: int = 1
     learning_rate: float = 1e-4
     num_epochs: int = 500
@@ -39,6 +39,7 @@ def main():
     config.outdir = Path(config.outdir)
     config.outdir.mkdir(exist_ok=True, parents=True)
     offload = False
+    dataset = FluxFillDataset(root="datasets/shapes")
     device = torch.device("cuda:0")
 
     # Initialize models
@@ -98,15 +99,15 @@ def main():
         if param.requires_grad:
             print(name)
 
+    ids = [1, 2, 3, 4, 5] if torch.cuda.device_count() > 1 else [0]
+    base_id = 1 if torch.cuda.device_count() > 1 else 0
     gpu_config = GPUSplitConfig(
-        gpu_ids=[1, 2, 3, 4, 5],  # List of GPU IDs to use
+        gpu_ids=ids,
         max_params_per_gpu=5e9,  # Maximum parameters per GPU
-        base_gpu=1  # GPU to place non-distributed components
+        base_gpu=base_id
     )
     model = split_flux_model_to_gpus(model, gpu_config)
     model = model.to()
-
-    dataset = FluxFillDataset(root="datasets/shapes")
 
     dataloader = DataLoader(
         dataset,

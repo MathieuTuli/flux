@@ -69,17 +69,19 @@ class FluxFillDataset(Dataset):
                 torchvision.transforms.Normalize([0.5], [0.5]),
             ]
         )
-        # self.random_rotate_crop = RandomRotatedCrop(
-        #     crop_size=(512, 512),
-        #     max_rotation=0,
-        #     padding=64
-        # )
-        self.random_rotate_crop = GridRotatedCrop(
-            crop_size=(512, 512),
-            stride=(256, 256),
-            max_rotation=0,
-            padding=64
-        )
+        if True:
+            self.random_rotate_crop = RandomRotatedCrop(
+                crop_size=(512, 512),
+                max_rotation=0,
+                padding=0
+            )
+        else:
+            self.random_rotate_crop = GridRotatedCrop(
+                crop_size=(512, 512),
+                stride=(256, 256),
+                max_rotation=0,
+                padding=0
+            )
         self.sphere_mapper = PanoramaSphereMapper(
             SphereConfig(patch_size=2, target_size=(512, 512))
         )
@@ -97,11 +99,13 @@ class FluxFillDataset(Dataset):
         panorama = Image.open(img_path).convert("RGB")
         w, h = panorama.size
         assert w > self.width and h > self.height
-        panorama = self.transform(panorama)
-        print(panorama.shape)
         # panorama = rearrange(panorama, "h w c -> c h w")
 
-        cropped_img, rotation, crop_pos = self.random_rotate_crop(panorama)
+        # cropped_img, rotation, crop_pos = self.random_rotate_crop(panorama)
+        cropped_img = self.transform(panorama.crop((0, 0, 512, 512)))
+        crop_pos = (0, 0)
+        rotation = 0
+        panorama = self.transform(panorama)
 
         sphere_coords = self.sphere_mapper.get_coords_for_crop(
             panorama_size=(h, w),
@@ -314,6 +318,8 @@ class GridRotatedCrop:
         self.available_positions = [
             (y, x) for y in y_positions for x in x_positions
         ]
+        import pdb
+        pdb.set_trace()
 
         # Shuffle positions
         torch.manual_seed(torch.randint(0, 2**32, (1,)).item())
@@ -417,6 +423,8 @@ class RandomRotatedCrop:
         """
         H, W = img.shape[-2:]
         rotation, crop_pos = self.get_params((H, W))
+        rotation = 0
+        crop_pos = (0, 0)
 
         transformed = apply_rotated_crop(
             img,

@@ -257,7 +257,7 @@ def main(
     replace_linear_with_lora(model, lora_rank, lora_scale, recursive=True)
     # ckpt_path = configs[name].ckpt_path
     # lora_done.safetensors"
-    ckpt_path = "shapes-with-sphere-pe/lora_last.safetensors"
+    ckpt_path = "lora_last.safetensors"
     if ckpt_path is not None:
         print("Loading checkpoint")
         # load_sft doesn't support torch.device

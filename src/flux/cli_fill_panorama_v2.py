@@ -104,7 +104,7 @@ def main(
     replace_linear_with_lora(model, lora_rank, lora_scale, recursive=True)
     # ckpt_path = configs[name].ckpt_path
     # lora_done.safetensors"
-    ckpt_path = "shapes-with-sphere-pe/lora_last.safetensors"
+    ckpt_path = "shapes-no-sphere-pe/lora_last.safetensors"
     if ckpt_path is not None:
         print("Loading checkpoint")
         # load_sft doesn't support torch.device
@@ -148,13 +148,14 @@ def main(
 
             box = (xpos.item(), ypos.item(),
                    xpos.item() + crop_size[0], ypos.item() + crop_size[1])
+            box = (0, 0, 512, 512)
             crop = panorama_pil.crop(box)
             img_cond_path = os.path.join(output_dir, f"img_cond_{idx}.png")
             output_name = os.path.join(output_dir, f"img_pred_{idx}.png")
             crop.save(img_cond_path)
             idx += 1
 
-            crop_pos = (xpos, ypos)
+            crop_pos = (box[0], box[1])
             sphere_coords = sphere_mapper.get_coords_for_crop(
                 panorama_size=(height, width),
                 crop_size=crop_size,
@@ -164,8 +165,8 @@ def main(
 
             opts = SamplingOptions(
                 prompt=prompt,
-                width=width,
-                height=height,
+                width=crop_size[0],
+                height=crop_size[1],
                 num_steps=num_steps,
                 guidance=guidance,
                 seed=seed,
@@ -200,6 +201,7 @@ def main(
                 img_cond_path=opts.img_cond_path,
                 mask_path=opts.img_mask_path,
             )
+            # import pdb; pdb.set_trace()
 
             timesteps = get_schedule(
                 opts.num_steps, inp["img"].shape[1], shift=(name != "flux-schnell"))
@@ -212,7 +214,7 @@ def main(
 
             x = 1
             # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
-            inp["sphere_coords"] = sphere_coords
+            inp["sphere_coords"] = None # sphere_coords
             # denoise initial noise
             x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
 
