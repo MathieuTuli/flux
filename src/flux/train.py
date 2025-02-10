@@ -27,8 +27,8 @@ class TrainingConfig:
     outdir = "shapes-no-sphere-pe"
     batch_size: int = 1
     learning_rate: float = 1e-4
-    num_epochs: int = 500
-    save_every: int = -1
+    num_epochs: int = 5000
+    save_every: int = 2500
     num_steps: int = 50
     guidance: float = 1.0
     seed: int = 420
