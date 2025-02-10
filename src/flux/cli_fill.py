@@ -19,7 +19,7 @@ from flux.util import (
     save_image
 )
 
-from flux_splitter import split_flux_model_to_gpus, GPUSplitConfig
+from flux.gpu_split import split_flux_model_to_gpus, GPUSplitConfig
 
 
 @dataclass
@@ -257,7 +257,7 @@ def main(
     replace_linear_with_lora(model, lora_rank, lora_scale, recursive=True)
     # ckpt_path = configs[name].ckpt_path
     # lora_done.safetensors"
-    ckpt_path = "shapes-with-sphere-pe/lora_last.safetensors"
+    ckpt_path = "shapes-without-sphere-pe/lora_last.safetensors"
     if ckpt_path is not None:
         print("Loading checkpoint")
         # load_sft doesn't support torch.device
@@ -341,7 +341,7 @@ def main(
             model = model.to(torch_device)
 
         x = 1
-        inp["coords"] = None  # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
+        inp["sphere_coords"] = None  # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
         # denoise initial noise
         x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
 

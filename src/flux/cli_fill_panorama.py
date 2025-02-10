@@ -264,6 +264,7 @@ class PanoramaInfiller:
 
     def update_result(self, crop_info: CropInfo, generated_image: Image.Image):
         """Update result buffer with newly generated image."""
+        import pdb; pdb.set_trace()
         y, x = crop_info.position
         mask = np.array(crop_info.mask) / 255.0
 
@@ -332,7 +333,7 @@ def main(
     replace_linear_with_lora(model, lora_rank, lora_scale, recursive=True)
     # ckpt_path = configs[name].ckpt_path
     # lora_done.safetensors"
-    ckpt_path = "shapes-with-sphere-pe/lora_last.safetensors"
+    ckpt_path = "shapes-without-sphere-pe/lora_last.safetensors"
     if ckpt_path is not None:
         print("Loading checkpoint")
         # load_sft doesn't support torch.device
@@ -384,8 +385,7 @@ def main(
             )
 
             # Add sphere coordinates
-            inp["sphere_coords"] = crop_info.sphere_coords.unsqueeze(
-                0).to(x.device)
+            inp["sphere_coords"] = None  # crop_info.sphere_coords.unsqueeze(0).to(x.device)
 
             # Generate
             timesteps = get_schedule(num_steps, inp["img"].shape[1])

@@ -69,17 +69,19 @@ class FluxFillDataset(Dataset):
                 torchvision.transforms.Normalize([0.5], [0.5]),
             ]
         )
-        # self.random_rotate_crop = RandomRotatedCrop(
-        #     crop_size=(512, 512),
-        #     max_rotation=0,
-        #     padding=64
-        # )
-        self.random_rotate_crop = GridRotatedCrop(
-            crop_size=(512, 512),
-            stride=(256, 256),
-            max_rotation=0,
-            padding=64
-        )
+        if True:
+            self.random_rotate_crop = RandomRotatedCrop(
+                crop_size=(512, 512),
+                max_rotation=0,
+                padding=64
+            )
+        else:
+            self.random_rotate_crop = GridRotatedCrop(
+                crop_size=(512, 512),
+                stride=(256, 256),
+                max_rotation=0,
+                padding=64
+            )
         self.sphere_mapper = PanoramaSphereMapper(
             SphereConfig(patch_size=2, target_size=(512, 512))
         )
