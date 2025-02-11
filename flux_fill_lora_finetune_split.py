@@ -26,6 +26,35 @@ from flux.model import FluxLoraWrapper
 from flux.gpu_split import split_flux_model_to_gpus, GPUSplitConfig
 
 
+def create_sinusoidal_pos_enc(h: int, w: int, pos_enc_channels: int = 4, pos_enc_cross: int = 0) -> torch.Tensor:
+    assert pos_enc_channels in [
+        4, 8, 12], "pos_enc_channels must be 4, 8, or 12"
+    assert pos_enc_cross in [0, 1, 2], "pos_enc_cross must be 0, 1, or 2"
+    assert pos_enc_channels >= 2 * \
+        pos_enc_cross, "pos_enc_channels must be >= 2 * pos_enc_cross"
+    x = torch.linspace(-1, 1, w)
+    y = torch.linspace(-1, 1, h)
+    Y, X = torch.meshgrid(y, x, indexing='ij')
+    pos_enc = torch.zeros((pos_enc_channels, h, w))
+    freqs = [2.7, 3.3]
+    pairs_per_dim = (pos_enc_channels - 2 * pos_enc_cross) // 4
+    for i in range(pairs_per_dim):
+        pos_enc[2*i] = torch.sin(X * np.pi * freqs[i])
+        pos_enc[2*i + 1] = torch.cos(X * np.pi * freqs[i])
+    y_start = 2 * pairs_per_dim
+    for i in range(pairs_per_dim):
+        pos_enc[y_start + 2*i] = torch.sin(Y * np.pi * freqs[i])
+        pos_enc[y_start + 2*i + 1] = torch.cos(Y * np.pi * freqs[i])
+    if pos_enc_cross > 0:
+        cross_start = 4 * pairs_per_dim
+        pos_enc[cross_start] = torch.sin(X * Y * np.pi * 4.2)
+        pos_enc[cross_start + 1] = torch.cos(X * Y * np.pi * 4.2)
+        if pos_enc_cross == 2:
+            pos_enc[cross_start + 2] = torch.sin((X**2 + Y**2) * np.pi * 2.5)
+            pos_enc[cross_start + 3] = torch.cos((X**2 + Y**2) * np.pi * 2.5)
+    return pos_enc
+
+
 def make_rec_mask(images, resolution, times=30):
     mask, times = torch.ones_like(images[0:1, :, :]), np.random.randint(
         1, times
@@ -52,11 +81,11 @@ def make_rec_mask(images, resolution, times=30):
 
 @dataclass
 class TrainingConfig:
-    outdir = "house-512-testing"
+    outdir = "house-pano-pe-p-2d-sin"
     batch_size: int = 1
     learning_rate: float = 1e-4
-    num_epochs: int = 1000
-    save_every: int = -1
+    num_epochs: int = 5000
+    save_every: int = 1000
     num_steps: int = 50
     guidance: float = 1.0
     seed: int = 420
@@ -76,6 +105,8 @@ class FluxFillDataset(Dataset):
         self.prompt = prompt
         self.height = height
         self.width = width
+        self.pos_enc = create_sinusoidal_pos_enc(
+            2048, 2048, 8, 0)
 
     def __len__(self):
         return len(self.image_paths)
@@ -99,7 +130,8 @@ class FluxFillDataset(Dataset):
         # print(xidx, yidx, xpos, ypos)
         box = (xpos, ypos, xpos + 512, ypos + 512)
         img = img.crop(box)
-        sphere_coords = [xidx / 4, yidx / 4, 512 / 1536, 512 / 1536]
+        sphere_coords = torch.tensor(
+            [xidx / 4, yidx / 4, 512 / 2048, 512 / 2048])
         # sphere_coords = yidx * len(x_positions) + xidx
         # sphere_coords = 0
         img = img.resize((512, 512))
@@ -234,7 +266,6 @@ def prepare_fill(
     path = OptimalTransportPath(sig_min=0)
     x0 = torch.randn_like(img, device=img.device)
     t, weights = path.get_timesteps(original_img.shape)
-    print(t)
     xt, vt = path.sample(img, x0, t)
     # NOTE: actually get the image based on noise and path
     return_dict = prepare(t5, clip, original_img, prompt)
@@ -330,11 +361,13 @@ def main():
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate)
     scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer, step_size=500, gamma=0.75)
+        optimizer, step_size=1500, gamma=0.5)
 
     # Training loop
     grad_accum_steps = max(1, len(dataset))
     print("Setting grad accum step:", grad_accum_steps)
+    with open("train.log", "w") as f:
+        f.write("epoch,step,loss\n")
     for epoch in range(config.num_epochs):
         model.train()
         epoch_loss = 0.
@@ -381,6 +414,8 @@ def main():
             del inputs
             loss.backward()
             print(f"Step loss: {loss.item():.4f}")
+            with open("train.log", "a+") as f:
+                f.write(f"{epoch},{step},{loss.item()}\n")
             if ((step + 1) % grad_accum_steps) == 0:
                 optimizer.step()
                 scheduler.step()
@@ -399,12 +434,14 @@ def main():
             #     f"lora_checkpoint_epoch_{epoch+1}.safetensors"
             # )
             sd = model.state_dict()
-            lora_dict = {k: sd[k] for k in sd.keys() if "lora_" in k}
+            lora_dict = {k: sd[k]
+                         for k in sd.keys() if "lora_" in k or "panorama" in k}
             # save_file(model.state_dict(), config.outdir /
             save_file(lora_dict, config.outdir /
                       f"lora_checkpoint_epoch_{epoch+1}.safetensors")
     sd = model.state_dict()
-    lora_dict = {k: sd[k] for k in sd.keys() if "lora_" in k}
+    lora_dict = {k: sd[k]
+                 for k in sd.keys() if "lora_" in k or "panorama" in k}
     save_file(lora_dict, config.outdir / "lora_last.safetensors")
 
 

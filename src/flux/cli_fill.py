@@ -109,7 +109,7 @@ def main(
         from safetensors.torch import load_file as load_sft
         ckpt_path = hf_hub_download(
             configs[name].repo_id, configs[name].repo_flow)
-        with torch.device("meta" if ckpt_path is not None else mdevice):
+        with torch.device("cpu" if ckpt_path is not None else mdevice):
             if lora_path is not None:
                 print("Loading LORA")
                 model = FluxLoraWrapper(
@@ -150,8 +150,12 @@ def main(
     # ----------
 
     rng = torch.Generator(device="cpu")
-    with Image.open(img_cond_path) as img:
-        width, height = img.size
+    img = Image.open(img_cond_path)
+    img = img.resize((2048, 2048))
+    img = img.crop((0, 0, 512, 512))
+    img.save("testing.png")
+    img_cond_path = "testing.png"
+    width, height = img.size
     opts = SamplingOptions(
         prompt=prompt,
         width=width,
@@ -214,7 +218,8 @@ def main(
 
         x = 1
         # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
-        inp["sphere_coords"] = torch.tensor([1])
+        sphere_coords = torch.tensor([0 / 4, 0 / 4, 512 / 1536, 512 / 1536])
+        inp["sphere_coords"] = sphere_coords
         # denoise initial noise
         x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
 

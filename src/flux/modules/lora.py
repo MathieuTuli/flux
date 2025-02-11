@@ -11,7 +11,7 @@ def replace_linear_with_lora(
     keys_ignore: list[str] = None,
 ) -> None:
     keys_override = keys_override or list()
-    keys_ignore = keys_ignore or list()
+    keys_ignore = keys_ignore or ["panorama_embedder"]
     for name, child in module.named_children():
         if name in keys_ignore:
             continue
