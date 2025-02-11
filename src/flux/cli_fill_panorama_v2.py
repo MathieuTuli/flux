@@ -104,7 +104,7 @@ def main(
     replace_linear_with_lora(model, lora_rank, lora_scale, recursive=True)
     # ckpt_path = configs[name].ckpt_path
     # lora_done.safetensors"
-    ckpt_path = "shapes-no-sphere-pe/lora_last.safetensors"
+    ckpt_path = "cube-inpaint-sanity-check/lora_last.safetensors"
     if ckpt_path is not None:
         print("Loading checkpoint")
         # load_sft doesn't support torch.device
@@ -133,14 +133,15 @@ def main(
     crop_size = (512, 512)
     sphere_mapper = PanoramaSphereMapper(SphereConfig(patch_size=2, target_size=crop_size))
     stride = (crop_size[0] // 2, crop_size[1] // 2)
+    stride = (512, 512)
 
-    x_positions = torch.arange(0, 1500, stride[0])
-    y_positions = torch.arange(0, 1500, stride[1])
+    x_positions = torch.arange(0, 1500, stride[0])[:1]
+    y_positions = torch.arange(0, 1500, stride[1])[:1]
 
     first_row = True
     idx = 0
-    for ypos in y_positions:
-        for xpos in x_positions:
+    for i, ypos in enumerate(y_positions):
+        for j, xpos in enumerate(x_positions):
             if first_row:
                 img_mask_path = "left_mask.png"
             else:
@@ -148,20 +149,24 @@ def main(
 
             box = (xpos.item(), ypos.item(),
                    xpos.item() + crop_size[0], ypos.item() + crop_size[1])
-            box = (0, 0, 512, 512)
             crop = panorama_pil.crop(box)
-            img_cond_path = os.path.join(output_dir, f"img_cond_{idx}.png")
-            output_name = os.path.join(output_dir, f"img_pred_{idx}.png")
+            img_cond_path = os.path.join(output_dir, f"{idx:02d}_cond.png")
+            output_name = os.path.join(output_dir, f"{idx:02d}_pred.png")
+            mask_oname = os.path.join(output_dir, f"{idx:02d}_mask.png")
             crop.save(img_cond_path)
-            idx += 1
+            Image.open(img_mask_path).save(mask_oname)
 
-            crop_pos = (box[0], box[1])
-            sphere_coords = sphere_mapper.get_coords_for_crop(
-                panorama_size=(height, width),
-                crop_size=crop_size,
-                crop_position=crop_pos,
-                rotation=0
-            )
+            # crop_pos = (box[0], box[1])
+            # sphere_coords = sphere_mapper.get_coords_for_crop(
+            #     panorama_size=(height, width),
+            #     crop_size=crop_size,
+            #     crop_position=crop_pos,
+            #     rotation=0
+            # )
+            sphere_coords = i * len(x_positions) + j
+            assert idx == sphere_coords, f"{idx} but sphere coords are {sphere_coords}, ({i}, {j})"
+            sphere_coords = torch.tensor([sphere_coords])
+            idx += 1
 
             opts = SamplingOptions(
                 prompt=prompt,
@@ -214,7 +219,7 @@ def main(
 
             x = 1
             # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
-            inp["sphere_coords"] = None # sphere_coords
+            inp["sphere_coords"] = sphere_coords
             # denoise initial noise
             x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
 
@@ -234,7 +239,7 @@ def main(
             t1 = time.perf_counter()
             print(f"Done in {t1 - t0:.1f}s")
 
-            idx = save_image(nsfw_classifier, name, output_name,
+            _ = save_image(nsfw_classifier, name, output_name,
                              idx, x, add_sampling_metadata, prompt)
         first_row = False
 

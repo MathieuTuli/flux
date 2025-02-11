@@ -34,158 +34,9 @@ class SamplingOptions:
     img_mask_path: str
 
 
-def parse_prompt(options: SamplingOptions) -> SamplingOptions | None:
-    user_question = "Next prompt (write /h for help, /q to quit and leave empty to repeat):\n"
-    usage = (
-        "Usage: Either write your prompt directly, leave this field empty "
-        "to repeat the prompt or write a command starting with a slash:\n"
-        "- '/s <seed>' sets the next seed\n"
-        "- '/g <guidance>' sets the guidance (flux-dev only)\n"
-        "- '/n <steps>' sets the number of steps\n"
-        "- '/q' to quit"
-    )
-
-    while (prompt := input(user_question)).startswith("/"):
-        if prompt.startswith("/g"):
-            if prompt.count(" ") != 1:
-                print(f"Got invalid command '{prompt}'\n{usage}")
-                continue
-            _, guidance = prompt.split()
-            options.guidance = float(guidance)
-            print(f"Setting guidance to {options.guidance}")
-        elif prompt.startswith("/s"):
-            if prompt.count(" ") != 1:
-                print(f"Got invalid command '{prompt}'\n{usage}")
-                continue
-            _, seed = prompt.split()
-            options.seed = int(seed)
-            print(f"Setting seed to {options.seed}")
-        elif prompt.startswith("/n"):
-            if prompt.count(" ") != 1:
-                print(f"Got invalid command '{prompt}'\n{usage}")
-                continue
-            _, steps = prompt.split()
-            options.num_steps = int(steps)
-            print(f"Setting number of steps to {options.num_steps}")
-        elif prompt.startswith("/q"):
-            print("Quitting")
-            return None
-        else:
-            if not prompt.startswith("/h"):
-                print(f"Got invalid command '{prompt}'\n{usage}")
-            print(usage)
-    if prompt != "":
-        options.prompt = prompt
-    return options
-
-
-def parse_img_cond_path(options: SamplingOptions | None) -> SamplingOptions | None:
-    if options is None:
-        return None
-
-    user_question = "Next conditioning image (write /h for help, /q to quit and leave empty to repeat):\n"
-    usage = (
-        "Usage: Either write your prompt directly, leave this field empty "
-        "to repeat the conditioning image or write a command starting with a slash:\n"
-        "- '/q' to quit"
-    )
-
-    while True:
-        img_cond_path = input(user_question)
-
-        if img_cond_path.startswith("/"):
-            if img_cond_path.startswith("/q"):
-                print("Quitting")
-                return None
-            else:
-                if not img_cond_path.startswith("/h"):
-                    print(f"Got invalid command '{img_cond_path}'\n{usage}")
-                print(usage)
-            continue
-
-        if img_cond_path == "":
-            break
-
-        if not os.path.isfile(img_cond_path) or not img_cond_path.lower().endswith(
-            (".jpg", ".jpeg", ".png", ".webp")
-        ):
-            print(
-                f"File '{img_cond_path}' does not exist or is not a valid image file")
-            continue
-        else:
-            with Image.open(img_cond_path) as img:
-                width, height = img.size
-
-            if width % 32 != 0 or height % 32 != 0:
-                print(
-                    f"Image dimensions must be divisible by 32, got {width}x{height}")
-                continue
-
-        options.img_cond_path = img_cond_path
-        break
-
-    return options
-
-
-def parse_img_mask_path(options: SamplingOptions | None) -> SamplingOptions | None:
-    if options is None:
-        return None
-
-    user_question = "Next conditioning mask (write /h for help, /q to quit and leave empty to repeat):\n"
-    usage = (
-        "Usage: Either write your prompt directly, leave this field empty "
-        "to repeat the conditioning mask or write a command starting with a slash:\n"
-        "- '/q' to quit"
-    )
-
-    while True:
-        img_mask_path = input(user_question)
-
-        if img_mask_path.startswith("/"):
-            if img_mask_path.startswith("/q"):
-                print("Quitting")
-                return None
-            else:
-                if not img_mask_path.startswith("/h"):
-                    print(f"Got invalid command '{img_mask_path}'\n{usage}")
-                print(usage)
-            continue
-
-        if img_mask_path == "":
-            break
-
-        if not os.path.isfile(img_mask_path) or not img_mask_path.lower().endswith(
-            (".jpg", ".jpeg", ".png", ".webp")
-        ):
-            print(
-                f"File '{img_mask_path}' does not exist or is not a valid image file")
-            continue
-        else:
-            with Image.open(img_mask_path) as img:
-                width, height = img.size
-
-            if width % 32 != 0 or height % 32 != 0:
-                print(
-                    f"Image dimensions must be divisible by 32, got {width}x{height}")
-                continue
-            else:
-                with Image.open(options.img_cond_path) as img_cond:
-                    img_cond_width, img_cond_height = img_cond.size
-
-                if width != img_cond_width or height != img_cond_height:
-                    print(
-                        f"Mask dimensions must match conditioning image, got {width}x{height} and {img_cond_width}x{img_cond_height}"
-                    )
-                    continue
-
-        options.img_mask_path = img_mask_path
-        break
-
-    return options
-
-
 @torch.inference_mode()
 def main(
+    lora_path = None,
     seed: int | None = None,
     prompt: str = "a photo of sks",
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -242,31 +93,50 @@ def main(
     # init all components
     t5 = load_t5(torch_device, max_length=128)
     clip = load_clip(torch_device)
-    # model = load_flow_model(name, device="cpu" if offload else torch_device)
     ae = load_ae(name, device="cpu" if offload else torch_device)
-    # MY LOADING
-    from flux.util import optionally_expand_state_dict, print_load_warning
-    from flux.modules.lora import LinearLora, replace_linear_with_lora
-    from safetensors.torch import load_file as load_sft
-    from flux.model import Flux
-    model = Flux(
-        params=configs[name].params).to(torch.bfloat16)
 
-    lora_rank = 16
-    lora_scale = 1.0
-    replace_linear_with_lora(model, lora_rank, lora_scale, recursive=True)
-    # ckpt_path = configs[name].ckpt_path
-    # lora_done.safetensors"
-    ckpt_path = "lora_last.safetensors"
-    if ckpt_path is not None:
-        print("Loading checkpoint")
-        # load_sft doesn't support torch.device
-        sd = load_sft(
-            ckpt_path, device="cpu")
-        sd = optionally_expand_state_dict(model, sd)
-        missing, unexpected = model.load_state_dict(
-            sd, strict=False, assign=True)
-        print_load_warning(missing, unexpected)
+    # MY LOADING
+    mdevice = "cpu" if offload else torch_device
+    if False:
+        model = load_flow_model(name, device=mdevice)
+    else:
+        name = "flux-dev-fill"
+        # lora_path = "shapes-inpaint-sanity-check/lora_last.safetensors"
+        verbose = True
+        from flux.util import optionally_expand_state_dict, print_load_warning
+        from huggingface_hub import hf_hub_download
+        from flux.model import Flux, FluxLoraWrapper
+        from safetensors.torch import load_file as load_sft
+        ckpt_path = hf_hub_download(
+            configs[name].repo_id, configs[name].repo_flow)
+        with torch.device("meta" if ckpt_path is not None else mdevice):
+            if lora_path is not None:
+                print("Loading LORA")
+                model = FluxLoraWrapper(
+                    lora_rank=128,
+                    params=configs[name].params).to(torch.bfloat16)
+            else:
+                print("Loading normal model (no LORA)")
+                model = Flux(configs[name].params).to(torch.bfloat16)
+
+        if ckpt_path is not None:
+            print("Loading checkpoint")
+            # load_sft doesn't support torch.device
+            sd = load_sft(ckpt_path, device=str(device))
+            sd = optionally_expand_state_dict(model, sd)
+            missing, unexpected = model.load_state_dict(
+                sd, strict=False, assign=True)
+            if verbose:
+                print_load_warning(missing, unexpected)
+
+        if lora_path is not None:
+            print("Loading LoRA")
+            lora_sd = load_sft(lora_path, device=str(device))
+            # loading the lora params + overwriting scale values in the norms
+            missing, unexpected = model.load_state_dict(
+                lora_sd, strict=False, assign=True)
+            if verbose:
+                print_load_warning(missing, unexpected)
 
     ids = [1, 2, 3, 4, 5] if torch.cuda.device_count() > 1 else [0]
     base_id = 1 if torch.cuda.device_count() > 1 else 0
@@ -343,7 +213,8 @@ def main(
             model = model.to(torch_device)
 
         x = 1
-        inp["sphere_coords"] = None  # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
+        # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
+        inp["sphere_coords"] = torch.tensor([1])
         # denoise initial noise
         x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
 
@@ -365,20 +236,7 @@ def main(
 
         idx = save_image(nsfw_classifier, name, output_name,
                          idx, x, add_sampling_metadata, prompt)
-
-        if loop:
-            print("-" * 80)
-            opts = parse_prompt(opts)
-            opts = parse_img_cond_path(opts)
-
-            with Image.open(opts.img_cond_path) as img:
-                width, height = img.size
-            opts.height = height
-            opts.width = width
-
-            opts = parse_img_mask_path(opts)
-        else:
-            opts = None
+        opts = None
 
 
 def app():

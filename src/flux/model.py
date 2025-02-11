@@ -13,6 +13,7 @@ from flux.modules.layers import (
     timestep_embedding,
 )
 from flux.modules.lora import LinearLora, replace_linear_with_lora
+import numpy as np
 
 
 @dataclass
@@ -58,6 +59,59 @@ class SingleStreamSequential(nn.Module):
         for block in self.blocks:
             img = block(img=img, vec=vec, pe=pe)
         return img
+
+
+def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
+    """
+    grid_size: int of the grid height and width
+    return:
+    pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
+    """
+    grid_h = np.arange(grid_size, dtype=np.float32)
+    grid_w = np.arange(grid_size, dtype=np.float32)
+    grid = np.meshgrid(grid_w, grid_h)  # here w goes first
+    grid = np.stack(grid, axis=0)
+
+    grid = grid.reshape([2, 1, grid_size, grid_size])
+    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
+    if cls_token and extra_tokens > 0:
+        pos_embed = np.concatenate(
+            [np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
+    return pos_embed
+
+
+def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
+    assert embed_dim % 2 == 0
+
+    # use half of dimensions to encode grid_h
+    emb_h = get_1d_sincos_pos_embed_from_grid(
+        embed_dim // 2, grid[0])  # (H*W, D/2)
+    emb_w = get_1d_sincos_pos_embed_from_grid(
+        embed_dim // 2, grid[1])  # (H*W, D/2)
+
+    emb = np.concatenate([emb_h, emb_w], axis=1)  # (H*W, D)
+    return emb
+
+
+def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
+    """
+    embed_dim: output dimension for each position
+    pos: a list of positions to be encoded: size (M,)
+    out: (M, D)
+    """
+    assert embed_dim % 2 == 0
+    omega = np.arange(embed_dim // 2, dtype=np.float64)
+    omega /= embed_dim / 2.
+    omega = 1. / 10000**omega  # (D/2,)
+
+    pos = pos.reshape(-1)  # (M,)
+    out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
+
+    emb_sin = np.sin(out)  # (M, D/2)
+    emb_cos = np.cos(out)  # (M, D/2)
+
+    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
+    return emb
 
 
 class Flux(nn.Module):
@@ -118,6 +172,13 @@ class Flux(nn.Module):
         # self.single_blocks = SingleStreamSequential(single_blocks)
 
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
+        # num_patches = 32 * 32 * 4
+        # self.pos_embed = nn.Parameter(torch.zeros(
+        #     1, num_patches, self.hidden_size), requires_grad=False)
+        # pos_embed = get_2d_sincos_pos_embed(
+        #     self.pos_embed.shape[-1], int(num_patches ** 0.5))
+        # self.pos_embed.data.copy_(
+        #     torch.from_numpy(pos_embed).float().unsqueeze(0))
 
     def forward(
         self,
@@ -145,17 +206,21 @@ class Flux(nn.Module):
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
 
+        img_ids[:, :, 1:] = img_ids[:, :, 1:] + 0.1 * sphere_coords
+        # img = img + self.pos_embed.squeeze(0).chunk(4)[sphere_coords.item()].unsqueeze(0).to(img.device).to(torch.bfloat16)
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
         sphere_pe = None
-        if sphere_coords is not None:
+        sphere_coords = None
+        if False and sphere_coords is not None:
             sphere_coords = compute_sphere_coords_32x32(sphere_coords)
             sphere_pe = self.sphere_embedder(sphere_coords,
                                              seq_len=ids.shape[1],
                                              txt_len=txt_ids.shape[1])
 
         for block in self.double_blocks:
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe, sphere_pe=sphere_pe)
+            img, txt = block(img=img, txt=txt, vec=vec,
+                             pe=pe, sphere_pe=sphere_pe)
 
         img = torch.cat((txt, img), 1)
         for block in self.single_blocks:

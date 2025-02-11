@@ -55,73 +55,72 @@ class FluxFillDataset(Dataset):
                  width: int = 512):
         root = root if isinstance(root, Path) else Path(root)
         self.image_paths = [f for f in root.iterdir()]
+        # self.mask_paths = [f for f in root.iterdir()
+        #                    if str(f).endswith(('mask.jpg', 'mask.png', 'mask.jpeg'))]
+        # assert len(self.image_paths) == len(self.mask_paths)
         self.prompt = prompt
         self.height = height
         self.width = width
-        # REVISIT:
-        # - setting rotation to 0 for now
-        # - padding? what's that
-
-        self.transform = torchvision.transforms.Compose(
-            [
-                torchvision.transforms.PILToTensor(),
-                torchvision.transforms.ConvertImageDtype(torch.float32),
-                torchvision.transforms.Normalize([0.5], [0.5]),
-            ]
-        )
-        if True:
-            self.random_rotate_crop = RandomRotatedCrop(
-                crop_size=(512, 512),
-                max_rotation=0,
-                padding=0
-            )
-        else:
-            self.random_rotate_crop = GridRotatedCrop(
-                crop_size=(512, 512),
-                stride=(256, 256),
-                max_rotation=0,
-                padding=0
-            )
-        self.sphere_mapper = PanoramaSphereMapper(
-            SphereConfig(patch_size=2, target_size=(512, 512))
-        )
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
-        # REVISIT:
-        # - basically, the panorama should already be "noramlized"?
-        # - it should be a sparse reconstruction on the unit sphere
-        # - from there, you can get a mask if it exceeds limits
-        # - but it will also wrap and then the crop should properly wrap too
-        panorama = Image.open(img_path).convert("RGB")
-        w, h = panorama.size
-        assert w > self.width and h > self.height
-        # panorama = rearrange(panorama, "h w c -> c h w")
+        img = Image.open(img_path).convert("RGB")
+        w, h = img.size
+        # mask = Image.open("mask.png").convert("L").resize((512, 512))
+        # mask = np.array(mask)
+        # mask = torch.from_numpy(mask).float() / 255.0
+        # mask = rearrange(mask, "h w -> 1 h w")
 
-        # cropped_img, rotation, crop_pos = self.random_rotate_crop(panorama)
-        cropped_img = self.transform(panorama.crop((0, 0, 512, 512)))
-        crop_pos = (0, 0)
-        rotation = 0
-        panorama = self.transform(panorama)
+        quad = False
+        quadrant = 0
+        if quad:
+            # Randomly select quadrant (0: top-left, 1: top-right, 2: bottom-left, 3: bottom-right)
+            quadrant = random.randint(0, 3)
 
-        sphere_coords = self.sphere_mapper.get_coords_for_crop(
-            panorama_size=(h, w),
-            crop_size=(512, 512),
-            crop_position=crop_pos,
-            rotation=rotation
-        )
+            # Calculate crop coordinates based on quadrant
+            crop_w, crop_h = w // 2, h // 2
+            if quadrant == 0:  # top-left
+                x1, y1 = 0, 0
+            elif quadrant == 1:  # top-right
+                x1, y1 = crop_w, 0
+            elif quadrant == 2:  # bottom-left
+                x1, y1 = 0, crop_h
+            else:  # bottom-right
+                x1, y1 = crop_w, crop_h
+            x2, y2 = x1 + crop_w, y1 + crop_h
 
-        # Compute spherical coordinates for the patches
-        sphere_coords = self.sphere_mapper.get_nearest_sphere_patches(
-            sphere_coords)
+            # Store crop coordinates and perform crop
+            img = img.crop((x1, y1, x2, y2)).resize((512, 512))
+        else:
+            img = img.resize((512, 512))
 
-        mask = make_rec_mask(cropped_img.unsqueeze(0),
-                             resolution=512, times=30).squeeze(0)
+        x = 1
+        if quadrant == 0:  # top-left
+            crop_coords = torch.Tensor([[0, 0], [x, x]])
+        elif quadrant == 1:  # top-right
+            crop_coords = torch.Tensor([[x, 0], [x * 2, x]])
+        elif quadrant == 2:  # bottom-left
+            crop_coords = torch.Tensor([[0, x], [x, x * 2]])
+        else:  # bottom-right
+            crop_coords = torch.Tensor([[x, x], [x * 2, x * 2]])
+        img = np.array(img)
+        img = torch.from_numpy(img).float() / 127.5 - 1.0
+        img = rearrange(img, "h w c -> c h w")
 
-        return cropped_img, mask, sphere_coords
+        # REVISIT: deprecate
+        # mask_path = self.mask_paths[idx]
+        # mask = Image.open(mask_path).convert("L").resize((512, 512))
+        # mask = np.array(mask)
+        # mask = torch.from_numpy(mask).float() / 255.0
+        # mask = rearrange(mask, "h w -> 1 h w")
+
+        mask = make_rec_mask(
+            img.unsqueeze(0), resolution=512, times=30).squeeze(0)
+
+        return img, mask, crop_coords
 
 
 def make_rec_mask(images, resolution, times=30, drop_mask_prob: float = 0.5):

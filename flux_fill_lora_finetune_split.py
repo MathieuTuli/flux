@@ -22,9 +22,8 @@ from flux.util import (
 from flux.modules.lora import LinearLora, replace_linear_with_lora
 from flux.modules.autoencoder import AutoEncoder
 from flux.modules.conditioner import HFEmbedder
-from flux.model import Flux
-from flux.sampling import unpack
-from flux_splitter import split_flux_model_to_gpus, GPUSplitConfig
+from flux.model import FluxLoraWrapper
+from flux.gpu_split import split_flux_model_to_gpus, GPUSplitConfig
 
 
 def make_rec_mask(images, resolution, times=30):
@@ -47,16 +46,17 @@ def make_rec_mask(images, resolution, times=30):
         mask[:, y_start: y_start + height, x_start: x_start + width] = 0
 
     mask = 1 - mask if random.random() < 0.5 else mask
+    # mask = mask * 0 if random.random() < 0.5 else mask
     return mask
 
 
 @dataclass
 class TrainingConfig:
-    outdir = "lora-overfit-fixed-mask-full-layers"
+    outdir = "house-512-testing"
     batch_size: int = 1
     learning_rate: float = 1e-4
-    num_epochs: int = 500
-    save_every: int = 100
+    num_epochs: int = 1000
+    save_every: int = -1
     num_steps: int = 50
     guidance: float = 1.0
     seed: int = 420
@@ -81,60 +81,36 @@ class FluxFillDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
+        img_path = self.image_paths[0]
         img = Image.open(img_path).convert("RGB")
         w, h = img.size
-        # mask = Image.open("mask.png").convert("L").resize((512, 512))
-        # mask = np.array(mask)
-        # mask = torch.from_numpy(mask).float() / 255.0
-        # mask = rearrange(mask, "h w -> 1 h w")
 
-        quad = True
-        if quad:
-            # Randomly select quadrant (0: top-left, 1: top-right, 2: bottom-left, 3: bottom-right)
-            quadrant = random.randint(0, 3)
+        # x_positions = [x.item() for x in torch.arange(0, min(w, 1500) - 256, 256)]
+        # y_positions = [x.item() for x in torch.arange(0, min(h, 1500) - 256, 256)]
 
-            # Calculate crop coordinates based on quadrant
-            crop_w, crop_h = w // 2, h // 2
-            if quadrant == 0:  # top-left
-                x1, y1 = 0, 0
-            elif quadrant == 1:  # top-right
-                x1, y1 = crop_w, 0
-            elif quadrant == 2:  # bottom-left
-                x1, y1 = 0, crop_h
-            else:  # bottom-right
-                x1, y1 = crop_w, crop_h
-            x2, y2 = x1 + crop_w, y1 + crop_h
+        x_positions = torch.arange(0, 1500, 512)[:3]
+        y_positions = torch.arange(0, 1500, 512)[:1]
 
-            # Store crop coordinates and perform crop
-            img = img.crop((x1, y1, x2, y2)).resize((512, 512))
-        else:
-            img = img.resize((512, 512))
-
-        x = 1
-        if quadrant == 0:  # top-left
-            crop_coords = torch.Tensor([[0, 0], [x, x]])
-        elif quadrant == 1:  # top-right
-            crop_coords = torch.Tensor([[x, 0], [x * 2, x]])
-        elif quadrant == 2:  # bottom-left
-            crop_coords = torch.Tensor([[0, x], [x, x * 2]])
-        else:  # bottom-right
-            crop_coords = torch.Tensor([[x, x], [x * 2, x * 2]])
+        xidx = np.random.randint(len(x_positions))
+        yidx = np.random.randint(len(y_positions))
+        xpos = x_positions[xidx].item()
+        ypos = y_positions[yidx].item()
+        # print(xidx, yidx, xpos, ypos)
+        # box = (xpos, ypos, xpos + 512, ypos + 512)
+        # img = img.crop(box)
+        # sphere_coords = yidx * len(x_positions) + xidx
+        sphere_coords = 0
+        img = img.resize((512, 512))
         img = np.array(img)
         img = torch.from_numpy(img).float() / 127.5 - 1.0
         img = rearrange(img, "h w c -> c h w")
 
-        # REVISIT: deprecate
-        # mask_path = self.mask_paths[idx]
-        # mask = Image.open(mask_path).convert("L").resize((512, 512))
-        # mask = np.array(mask)
-        # mask = torch.from_numpy(mask).float() / 255.0
-        # mask = rearrange(mask, "h w -> 1 h w")
-
         mask = make_rec_mask(
             img.unsqueeze(0), resolution=512, times=30).squeeze(0)
 
-        return img, mask, crop_coords
+        if sphere_coords is None:
+            return img, mask
+        return img, mask, sphere_coords
 
 
 class OptimalTransportPath:
@@ -256,6 +232,7 @@ def prepare_fill(
     path = OptimalTransportPath(sig_min=0)
     x0 = torch.randn_like(img, device=img.device)
     t, weights = path.get_timesteps(original_img.shape)
+    print(t)
     xt, vt = path.sample(img, x0, t)
     # NOTE: actually get the image based on noise and path
     return_dict = prepare(t5, clip, original_img, prompt)
@@ -284,7 +261,7 @@ def main():
     hf_download = True
     # Loading Flux
     print("Init model")
-    ckpt_path = configs[name].ckpt_path
+    ckpt_path = configs[name].ckpt_path  # should be None
     if (
         ckpt_path is None
         and configs[name].repo_id is not None
@@ -294,8 +271,9 @@ def main():
         ckpt_path = hf_hub_download(
             configs[name].repo_id, configs[name].repo_flow)
 
-    model = Flux(
-        params=configs[name].params)
+    with torch.device("cpu" if ckpt_path is not None else device):
+        model = FluxLoraWrapper(lora_rank=128,
+                                params=configs[name].params).to(torch.bfloat16)
 
     if ckpt_path is not None:
         print("Loading checkpoint")
@@ -306,13 +284,6 @@ def main():
         missing, unexpected = model.load_state_dict(
             sd, strict=False, assign=True)
         print_load_warning(missing, unexpected)
-
-    lora_rank = 16
-    lora_scale = 1.
-    replace_linear_with_lora(model, lora_rank, lora_scale, recursive=True,
-                             # keys_override=["single_blocks", "final_layer"],
-                             # keys_ignore=["img_in", "txt_in", "final_layer"],
-                             )
 
     model.requires_grad_(False)
 
@@ -332,14 +303,14 @@ def main():
             print(name)
 
     gpu_config = GPUSplitConfig(
-        gpu_ids=[1, 2, 3, 4, 5],  # List of GPU IDs to use
+        gpu_ids=[0],  # List of GPU IDs to use
         max_params_per_gpu=5e9,  # Maximum parameters per GPU
-        base_gpu=1  # GPU to place non-distributed components
+        base_gpu=0  # GPU to place non-distributed components
     )
     model = split_flux_model_to_gpus(model, gpu_config)
     model = model.to()
 
-    dataset = FluxFillDataset(root="cube-dataset")
+    dataset = FluxFillDataset(root="datasets/house")
 
     dataloader = DataLoader(
         dataset,
@@ -352,9 +323,11 @@ def main():
     # optimizer = bitsandbytes.optim.AdamW8bit(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate)
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, step_size=500, gamma=0.75)
 
     # Training loop
-    grad_accum_steps = min(16, len(dataset))
+    grad_accum_steps = max(1, len(dataset))
     print("Setting grad accum step:", grad_accum_steps)
     for epoch in range(config.num_epochs):
         model.train()
@@ -363,7 +336,11 @@ def main():
 
             if offload:
                 t5, clip, ae = t5.to(device), clip.to(device), ae.to(device)
-            img, mask, coords = batch
+            if len(batch) == 3:
+                img, mask, sphere_coords = batch
+            else:
+                img, mask = batch
+                sphere_coords = None
             img, mask = img.to(device), mask.to(device)
             inputs = prepare_fill(
                 t5=t5, clip=clip, ae=ae,
@@ -388,7 +365,7 @@ def main():
                 y=inputs["vec"],
                 timesteps=inputs["t"],
                 guidance=guids,
-                homo_pos_map=None  # coords,
+                sphere_coords=sphere_coords,
             ).to("cuda:0")
             # pred = unpack(pred, 512, 512).to("cuda:0")
             loss = torch.nn.functional.mse_loss(
@@ -400,6 +377,7 @@ def main():
             print(f"Step loss: {loss.item():.4f}")
             if ((step + 1) % grad_accum_steps) == 0:
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
             epoch_loss += loss.item()
 
@@ -409,16 +387,19 @@ def main():
         print(
             f"Epoch {epoch+1}/{config.num_epochs}, Loss: {epoch_loss/len(dataloader):.4f}")
 
-        if (epoch + 1) % config.save_every == 0:
+        if config.save_every > 0 and (epoch + 1) % config.save_every == 0:
             # torch.save(
             #     model.state_dict(),
             #     f"lora_checkpoint_epoch_{epoch+1}.safetensors"
             # )
             sd = model.state_dict()
             lora_dict = {k: sd[k] for k in sd.keys() if "lora_" in k}
-            save_file(model.state_dict(), config.outdir /
+            # save_file(model.state_dict(), config.outdir /
+            save_file(lora_dict, config.outdir /
                       f"lora_checkpoint_epoch_{epoch+1}.safetensors")
-    save_file(model.state_dict(), config.outdir / "lora_done.safetensors")
+    sd = model.state_dict()
+    lora_dict = {k: sd[k] for k in sd.keys() if "lora_" in k}
+    save_file(lora_dict, config.outdir / "lora_last.safetensors")
 
 
 if __name__ == "__main__":
