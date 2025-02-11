@@ -141,6 +141,7 @@ def new_to_method(self, *args, **kwargs):
     # Move base components to primary GPU
     base_device = torch.device(f"cuda:{self._base_gpu}")
     # self.pos_embed = self.pos_embed.to(base_device, *args, **kwargs)
+    self.panorama_embedder = self.panorama_embedder.to(base_device, *args, **kwargs)
     self.pe_embedder = self.pe_embedder.to(base_device, *args, **kwargs)
     self.sphere_embedder = self.sphere_embedder.to(base_device, *args, **kwargs)
     self.img_in = self.img_in.to(base_device, *args, **kwargs)

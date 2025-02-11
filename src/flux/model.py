@@ -14,6 +14,7 @@ from flux.modules.layers import (
 )
 from flux.modules.lora import LinearLora, replace_linear_with_lora
 import numpy as np
+import math
 
 
 @dataclass
@@ -114,6 +115,121 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     return emb
 
 
+@dataclass
+class PanoramaPosition:
+    """Position in the global panorama"""
+    x: float  # Normalized x position [0,1] in global panorama
+    y: float  # Normalized y position [0,1] in global panorama
+    width: float  # Normalized width of current image in panorama
+    height: float  # Normalized height of current image in panorama
+
+
+class GlobalPanoramaEmbedder(nn.Module):
+    """Learns global positional embeddings for an image's position in a larger panorama"""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        pano_embed_dim: int = 64,
+        use_learned_features: bool = True
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.pano_embed_dim = pano_embed_dim
+
+        # CNN to process positional features
+        if use_learned_features:
+            self.pos_cnn = nn.Sequential(
+                nn.Conv2d(4, 16, 3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(16, 32, 3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(32, pano_embed_dim, 3, padding=1)
+            )
+        else:
+            self.pos_cnn = None
+
+        # Project to attention dimension
+        self.proj = nn.Linear(pano_embed_dim, hidden_size)
+
+        # Optional layer norm
+        self.norm = nn.LayerNorm(hidden_size)
+
+    def create_position_features(
+        self,
+        batch_size: int,
+        seq_len: int,
+        pano_pos,
+        device: torch.device
+    ) -> Tensor:
+        """Creates a feature grid encoding the image's position in the panorama"""
+        # Create normalized coordinate grid for the sequence
+        h = w = int(math.sqrt(seq_len))  # Assuming square patches
+        y_grid = torch.linspace(0, 1, h, device=device)
+        x_grid = torch.linspace(0, 1, w, device=device)
+        grid_y, grid_x = torch.meshgrid(y_grid, x_grid, indexing='ij')
+
+        # Scale and offset grid by panorama position
+        global_x = pano_pos[0] + grid_x * pano_pos[2]
+        global_y = pano_pos[1] + grid_y * pano_pos[3]
+
+        # Stack features: [global_x, global_y, local_x, local_y]
+        features = torch.stack([
+            global_x,
+            global_y,
+            grid_x,
+            grid_y
+        ], dim=0)
+
+        # Expand for batch dimension
+        features = features.unsqueeze(0).expand(batch_size, -1, -1, -1)
+        return features
+
+    def forward(
+        self,
+        seq_len: int,
+        pano_pos,
+        batch_size: int = 1,
+        device: torch.device = None
+    ) -> Tensor:
+        """
+        Generate global panorama embeddings
+
+        Args:
+            seq_len: Length of the sequence (number of patches)
+            pano_pos: Position in global panorama
+            batch_size: Batch size
+            device: Target device
+
+        Returns:
+            Tensor of shape (batch_size, seq_len, hidden_size)
+        """
+        if device is None:
+            device = next(self.parameters()).device
+
+        # Create position features
+        pos_features = self.create_position_features(
+            batch_size, seq_len, pano_pos, device
+        )
+
+        # Process with CNN if enabled
+        if self.pos_cnn is not None:
+            embeddings = self.pos_cnn(pos_features)
+        else:
+            embeddings = pos_features
+
+        # Reshape to sequence
+        h = w = int(math.sqrt(seq_len))
+        embeddings = embeddings.reshape(batch_size, self.pano_embed_dim, h * w)
+        embeddings = embeddings.permute(0, 2, 1)  # [B, seq_len, dim]
+
+        # Project to hidden dimension
+        embeddings = self.proj(embeddings)
+        embeddings = self.norm(embeddings)
+
+        return embeddings
+
+
 class Flux(nn.Module):
     """
     Transformer model for flow matching on sequences.
@@ -172,6 +288,9 @@ class Flux(nn.Module):
         # self.single_blocks = SingleStreamSequential(single_blocks)
 
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
+        self.panorama_embedder = GlobalPanoramaEmbedder(
+            hidden_size=params.hidden_size,
+        )
         # num_patches = 32 * 32 * 4
         # self.pos_embed = nn.Parameter(torch.zeros(
         #     1, num_patches, self.hidden_size), requires_grad=False)
@@ -206,17 +325,20 @@ class Flux(nn.Module):
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
 
-        img_ids[:, :, 1:] = img_ids[:, :, 1:] + 0.1 * sphere_coords
+        # img_ids[:, :, 1:] = img_ids[:, :, 1:] + 0.1 * sphere_coords
         # img = img + self.pos_embed.squeeze(0).chunk(4)[sphere_coords.item()].unsqueeze(0).to(img.device).to(torch.bfloat16)
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
-        sphere_pe = None
-        sphere_coords = None
-        if False and sphere_coords is not None:
-            sphere_coords = compute_sphere_coords_32x32(sphere_coords)
-            sphere_pe = self.sphere_embedder(sphere_coords,
-                                             seq_len=ids.shape[1],
-                                             txt_len=txt_ids.shape[1])
+        # sphere_pe = None
+        # sphere_coords = None
+        if sphere_coords is not None:
+            sphere_pe = self.panorama_embedder(
+                seq_len=img.shape[1],
+                pano_pos=sphere_coords,
+                batch_size=img.shape[0],
+                device=img.device
+            )
+            img = img + sphere_pe
 
         for block in self.double_blocks:
             img, txt = block(img=img, txt=txt, vec=vec,

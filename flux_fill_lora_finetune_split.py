@@ -83,23 +83,25 @@ class FluxFillDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_paths[0]
         img = Image.open(img_path).convert("RGB")
+        img = img.resize((2048, 2028))
         w, h = img.size
 
         # x_positions = [x.item() for x in torch.arange(0, min(w, 1500) - 256, 256)]
         # y_positions = [x.item() for x in torch.arange(0, min(h, 1500) - 256, 256)]
 
-        x_positions = torch.arange(0, 1500, 512)[:3]
-        y_positions = torch.arange(0, 1500, 512)[:1]
+        x_positions = torch.arange(0, 2048, 512)
+        y_positions = torch.arange(0, 2048, 512)
 
         xidx = np.random.randint(len(x_positions))
         yidx = np.random.randint(len(y_positions))
         xpos = x_positions[xidx].item()
         ypos = y_positions[yidx].item()
         # print(xidx, yidx, xpos, ypos)
-        # box = (xpos, ypos, xpos + 512, ypos + 512)
-        # img = img.crop(box)
+        box = (xpos, ypos, xpos + 512, ypos + 512)
+        img = img.crop(box)
+        sphere_coords = [xidx / 4, yidx / 4, 512 / 1536, 512 / 1536]
         # sphere_coords = yidx * len(x_positions) + xidx
-        sphere_coords = 0
+        # sphere_coords = 0
         img = img.resize((512, 512))
         img = np.array(img)
         img = torch.from_numpy(img).float() / 127.5 - 1.0
@@ -287,11 +289,15 @@ def main():
 
     model.requires_grad_(False)
 
+    from flux.model import GlobalPanoramaEmbedder
+
     def set_requires_grad_recursive(module, name=''):
         if isinstance(module, LinearLora):
             module.requires_grad_(False)
             module.lora_A.requires_grad_(True)
             module.lora_B.requires_grad_(True)
+        elif isinstance(module, GlobalPanoramaEmbedder):
+            module.requires_grad_(True)
         for child_name, child in module.named_children():
             child_full_name = f"{name}.{child_name}" if name else child_name
             set_requires_grad_recursive(child, child_full_name)
