@@ -8,7 +8,7 @@ from huggingface_hub import hf_hub_download
 from einops import rearrange, repeat
 from PIL import Image
 
-import bitsandbytes
+import torchvision
 import numpy as np
 import random
 # import math
@@ -81,7 +81,7 @@ def make_rec_mask(images, resolution, times=30):
 
 @dataclass
 class TrainingConfig:
-    outdir = "house-pano-pe-p-2d-sin"
+    outdir = "house-pano-kaveh-pe"
     batch_size: int = 1
     learning_rate: float = 1e-4
     num_epochs: int = 5000
@@ -120,28 +120,66 @@ class FluxFillDataset(Dataset):
         # x_positions = [x.item() for x in torch.arange(0, min(w, 1500) - 256, 256)]
         # y_positions = [x.item() for x in torch.arange(0, min(h, 1500) - 256, 256)]
 
-        x_positions = torch.arange(0, 2048, 512)
-        y_positions = torch.arange(0, 2048, 512)
+        if False:
+            x_positions = torch.arange(0, 2048, 512)
+            y_positions = torch.arange(0, 2048, 512)
 
-        xidx = np.random.randint(len(x_positions))
-        yidx = np.random.randint(len(y_positions))
-        xpos = x_positions[xidx].item()
-        ypos = y_positions[yidx].item()
-        # print(xidx, yidx, xpos, ypos)
-        box = (xpos, ypos, xpos + 512, ypos + 512)
-        img = img.crop(box)
-        sphere_coords = torch.tensor(
-            [xidx / 4, yidx / 4, 512 / 2048, 512 / 2048])
-        # sphere_coords = yidx * len(x_positions) + xidx
-        # sphere_coords = 0
-        img = img.resize((512, 512))
-        img = np.array(img)
-        img = torch.from_numpy(img).float() / 127.5 - 1.0
-        img = rearrange(img, "h w c -> c h w")
+            xidx = np.random.randint(len(x_positions))
+            yidx = np.random.randint(len(y_positions))
+            xpos = x_positions[xidx].item()
+            ypos = y_positions[yidx].item()
+            box = (xpos, ypos, xpos + 512, ypos + 512)
+            # img = img.crop(box)
+            sphere_coords = torch.tensor(
+                [xidx / 4, yidx / 4, 512 / 2048, 512 / 2048])
+
+            img = np.array(img)
+            img = torch.from_numpy(img).float() / 127.5 - 1.0
+            img = rearrange(img, "h w c -> c h w")
+
+            mask = make_rec_mask(
+                img.unsqueeze(0), resolution=512, times=30).squeeze(0)
+        else:
+            import math
+            import cv2
+
+            def get_random_square_points() -> np.ndarray:
+                cx = random.randint(256, 768)
+                cy = random.randint(256, 768)
+                angle = random.uniform(0, 360)
+                side = random.randint(256, 512)
+                half_side = side / 2
+                points = []
+                for dx, dy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
+                    x = cx + dx * half_side
+                    y = cy + dy * half_side
+                    rx = (x - cx) * math.cos(math.radians(angle)) - \
+                        (y - cy) * math.sin(math.radians(angle)) + cx
+                    ry = (x - cx) * math.sin(math.radians(angle)) + \
+                        (y - cy) * math.cos(math.radians(angle)) + cy
+                    points.append([rx, ry])
+                return np.array(points, dtype=np.float32)
+
+            def get_perspective_transform(points: np.ndarray, size: Tuple[int, int] = (512, 512)) -> np.ndarray:
+                target = np.array([[0, 0], [size[0], 0], [size[0], size[1]], [
+                                  0, size[1]]], dtype=np.float32)
+                return cv2.getPerspectiveTransform(points, target)
+
+            points = get_random_square_points()
+            # points = np.array([[0, 0], [512, 0], [512, 512], [0, 512]], dtype=np.float32)
+            M = get_perspective_transform(points)
+            img = np.array(img)
+            img = cv2.warpPerspective(img, M, (512, 512))
+            img = torch.from_numpy(img).float() / 127.5 - 1.0
+            img = rearrange(img, "h w c -> c h w")
+            sphere_coords = torch.stack([torch.from_numpy(
+                cv2.warpPerspective(self.pos_enc[i].numpy(),
+                                    M, (512, 512), flags=cv2.INTER_LINEAR,
+                                    borderMode=cv2.BORDER_CONSTANT))
+                for i in range(self.pos_enc.shape[0])])
 
         mask = make_rec_mask(
             img.unsqueeze(0), resolution=512, times=30).squeeze(0)
-
         if sphere_coords is None:
             return img, mask
         return img, mask, sphere_coords
@@ -320,14 +358,14 @@ def main():
 
     model.requires_grad_(False)
 
-    from flux.model import GlobalPanoramaEmbedder
+    from flux.model import PosEncProcessor
 
     def set_requires_grad_recursive(module, name=''):
         if isinstance(module, LinearLora):
             module.requires_grad_(False)
             module.lora_A.requires_grad_(True)
             module.lora_B.requires_grad_(True)
-        elif isinstance(module, GlobalPanoramaEmbedder):
+        elif isinstance(module, PosEncProcessor):
             module.requires_grad_(True)
         for child_name, child in module.named_children():
             child_full_name = f"{name}.{child_name}" if name else child_name

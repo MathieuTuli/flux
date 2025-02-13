@@ -229,8 +229,8 @@ class Flux(nn.Module):
 
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
         self.panorama_embedder = PosEncProcessor(
-                in_channels=8, hidden_dim=params.hidden_size,
-                target_spatial=(32, 32)
+            in_channels=8, hidden_dim=params.hidden_size,
+            target_spatial=(32, 32)
         )
         # num_patches = 32 * 32
         # self.pos_embed = nn.Parameter(torch.zeros(
@@ -273,11 +273,11 @@ class Flux(nn.Module):
         # sphere_pe = None
         # sphere_coords = None
         # REVISIT: doing cause bs = 1
-        sphere_coords = sphere_coords.squeeze(0)
+        # sphere_coords = sphere_coords.squeeze(0)
         sphere_pe = None
         if sphere_coords is not None:
             pano_pe = self.panorama_embedder(
-                    sphere_coords
+                sphere_coords.to(torch.bfloat16)
             )
             img = img + pano_pe
 

@@ -2,6 +2,11 @@ import os
 import re
 import time
 from dataclasses import dataclass
+import numpy as np
+import math
+from einops import rearrange
+import random
+import torchvision
 from glob import iglob
 
 import torch
@@ -22,6 +27,35 @@ from flux.util import (
 from flux.gpu_split import split_flux_model_to_gpus, GPUSplitConfig
 
 
+def create_sinusoidal_pos_enc(h: int, w: int, pos_enc_channels: int = 4, pos_enc_cross: int = 0) -> torch.Tensor:
+    assert pos_enc_channels in [
+        4, 8, 12], "pos_enc_channels must be 4, 8, or 12"
+    assert pos_enc_cross in [0, 1, 2], "pos_enc_cross must be 0, 1, or 2"
+    assert pos_enc_channels >= 2 * \
+        pos_enc_cross, "pos_enc_channels must be >= 2 * pos_enc_cross"
+    x = torch.linspace(-1, 1, w)
+    y = torch.linspace(-1, 1, h)
+    Y, X = torch.meshgrid(y, x, indexing='ij')
+    pos_enc = torch.zeros((pos_enc_channels, h, w))
+    freqs = [2.7, 3.3]
+    pairs_per_dim = (pos_enc_channels - 2 * pos_enc_cross) // 4
+    for i in range(pairs_per_dim):
+        pos_enc[2*i] = torch.sin(X * np.pi * freqs[i])
+        pos_enc[2*i + 1] = torch.cos(X * np.pi * freqs[i])
+    y_start = 2 * pairs_per_dim
+    for i in range(pairs_per_dim):
+        pos_enc[y_start + 2*i] = torch.sin(Y * np.pi * freqs[i])
+        pos_enc[y_start + 2*i + 1] = torch.cos(Y * np.pi * freqs[i])
+    if pos_enc_cross > 0:
+        cross_start = 4 * pairs_per_dim
+        pos_enc[cross_start] = torch.sin(X * Y * np.pi * 4.2)
+        pos_enc[cross_start + 1] = torch.cos(X * Y * np.pi * 4.2)
+        if pos_enc_cross == 2:
+            pos_enc[cross_start + 2] = torch.sin((X**2 + Y**2) * np.pi * 2.5)
+            pos_enc[cross_start + 3] = torch.cos((X**2 + Y**2) * np.pi * 2.5)
+    return pos_enc
+
+
 @dataclass
 class SamplingOptions:
     prompt: str
@@ -36,7 +70,7 @@ class SamplingOptions:
 
 @torch.inference_mode()
 def main(
-    lora_path = None,
+    lora_path=None,
     seed: int | None = None,
     prompt: str = "a photo of sks",
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -150,11 +184,54 @@ def main(
     # ----------
 
     rng = torch.Generator(device="cpu")
+
+    import cv2
+
+    def get_random_square_points() -> np.ndarray:
+        cx = random.randint(256, 768)
+        cy = random.randint(256, 768)
+        angle = random.uniform(0, 360)
+        side = random.randint(256, 512)
+        half_side = side / 2
+        points = []
+        for dx, dy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
+            x = cx + dx * half_side
+            y = cy + dy * half_side
+            rx = (x - cx) * math.cos(math.radians(angle)) - \
+                (y - cy) * math.sin(math.radians(angle)) + cx
+            ry = (x - cx) * math.sin(math.radians(angle)) + \
+                (y - cy) * math.cos(math.radians(angle)) + cy
+            points.append([rx, ry])
+        return np.array(points, dtype=np.float32)
+
+    def get_perspective_transform(points: np.ndarray, size: tuple[int, int] = (512, 512)) -> np.ndarray:
+        target = np.array([[0, 0], [size[0], 0], [size[0], size[1]], [
+                          0, size[1]]], dtype=np.float32)
+        return cv2.getPerspectiveTransform(points, target)
+
+    pos_enc = create_sinusoidal_pos_enc(
+        2048, 2048, 8, 0)
+
     img = Image.open(img_cond_path)
-    img = img.resize((2048, 2048))
-    img = img.crop((0, 0, 512, 512))
-    img.save("testing.png")
+    img = img.resize((2048, 2028))
+    points = get_random_square_points()
+    # points = np.array([[0, 0], [512, 0], [512, 512], [0, 512]], dtype=np.float32)
+    M = get_perspective_transform(points)
+    img = np.array(img)
+    img = cv2.warpPerspective(img, M, (512, 512))
+    cv2.imwrite("testing.png", img)
     img_cond_path = "testing.png"
+    raise
+    img = torch.from_numpy(img).float() / 127.5 - 1.0
+    img = rearrange(img, "h w c -> c h w")
+    sphere_coords = torch.stack([torch.from_numpy(
+        cv2.warpPerspective(pos_enc[i].numpy(),
+                            M, (512, 512), flags=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_CONSTANT))
+        for i in range(pos_enc.shape[0])]).unsqueeze(0)
+
+    img = torchvision.transforms.ToPILImage()(img)
+
     width, height = img.size
     opts = SamplingOptions(
         prompt=prompt,
@@ -167,16 +244,6 @@ def main(
         img_mask_path=img_mask_path,
     )
 
-    if loop:
-        opts = parse_prompt(opts)
-        opts = parse_img_cond_path(opts)
-
-        with Image.open(opts.img_cond_path) as img:
-            width, height = img.size
-        opts.height = height
-        opts.width = width
-
-        opts = parse_img_mask_path(opts)
 
     while opts is not None:
         if opts.seed is None:
@@ -218,7 +285,7 @@ def main(
 
         x = 1
         # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
-        sphere_coords = torch.tensor([0 / 4, 0 / 4, 512 / 1536, 512 / 1536])
+        # sphere_coords = torch.tensor([0 / 4, 0 / 4, 512 / 1536, 512 / 1536])
         inp["sphere_coords"] = sphere_coords
         # denoise initial noise
         x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
