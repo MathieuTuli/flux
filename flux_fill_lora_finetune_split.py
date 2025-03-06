@@ -1,3 +1,4 @@
+from argparse import ArgumentParser
 from dataclasses import dataclass
 from typing import Tuple
 from pathlib import Path
@@ -8,25 +9,27 @@ from huggingface_hub import hf_hub_download
 from einops import rearrange, repeat
 from PIL import Image
 
-import torchvision
 import numpy as np
 import random
-# import math
 import torch
+import math
 
 from flux.util import (
     load_t5, load_clip, load_ae,
     configs, optionally_expand_state_dict,
     print_load_warning
 )
-from flux.modules.lora import LinearLora, replace_linear_with_lora
+from flux.gpu_split import split_flux_model_to_gpus, GPUSplitConfig
 from flux.modules.autoencoder import AutoEncoder
 from flux.modules.conditioner import HFEmbedder
-from flux.model import FluxLoraWrapper
-from flux.gpu_split import split_flux_model_to_gpus, GPUSplitConfig
+from flux.modules.layers import SelfAttention
+from flux.modules.lora import LinearLora
+from flux.model import PosEncProcessor, FluxLoraWrapper
 
 
-def create_sinusoidal_pos_enc(h: int, w: int, pos_enc_channels: int = 4, pos_enc_cross: int = 0) -> torch.Tensor:
+def create_sinusoidal_pos_enc(h: int, w: int,
+                              pos_enc_channels: int = 4,
+                              pos_enc_cross: int = 0) -> torch.Tensor:
     assert pos_enc_channels in [
         4, 8, 12], "pos_enc_channels must be 4, 8, or 12"
     assert pos_enc_cross in [0, 1, 2], "pos_enc_cross must be 0, 1, or 2"
@@ -36,8 +39,9 @@ def create_sinusoidal_pos_enc(h: int, w: int, pos_enc_channels: int = 4, pos_enc
     y = torch.linspace(-1, 1, h)
     Y, X = torch.meshgrid(y, x, indexing='ij')
     pos_enc = torch.zeros((pos_enc_channels, h, w))
-    freqs = [2.7, 3.3]
     pairs_per_dim = (pos_enc_channels - 2 * pos_enc_cross) // 4
+    freqs = torch.exp(torch.linspace(
+        math.log(1.0), math.log(10.0), pairs_per_dim))
     for i in range(pairs_per_dim):
         pos_enc[2*i] = torch.sin(X * np.pi * freqs[i])
         pos_enc[2*i + 1] = torch.cos(X * np.pi * freqs[i])
@@ -81,14 +85,10 @@ def make_rec_mask(images, resolution, times=30):
 
 @dataclass
 class TrainingConfig:
-    outdir = "house-pano-kaveh-pe"
     batch_size: int = 1
     learning_rate: float = 1e-4
     num_epochs: int = 5000
     save_every: int = 1000
-    num_steps: int = 50
-    guidance: float = 1.0
-    seed: int = 420
 
 
 class FluxFillDataset(Dataset):
@@ -100,7 +100,8 @@ class FluxFillDataset(Dataset):
         root = root if isinstance(root, Path) else Path(root)
         self.image_paths = [f for f in root.iterdir()]
         # self.mask_paths = [f for f in root.iterdir()
-        #                    if str(f).endswith(('mask.jpg', 'mask.png', 'mask.jpeg'))]
+        #                    if str(f).endswith(('mask.jpg', 'mask.png',
+        #                                        'mask.jpeg'))]
         # assert len(self.image_paths) == len(self.mask_paths)
         self.prompt = prompt
         self.height = height
@@ -144,10 +145,11 @@ class FluxFillDataset(Dataset):
             import cv2
 
             def get_random_square_points() -> np.ndarray:
-                cx = random.randint(256, 768)
-                cy = random.randint(256, 768)
-                angle = random.uniform(0, 360)
-                side = random.randint(256, 512)
+                cx = random.randint(256, 2048 - 256)
+                cy = random.randint(256, 2048 - 256)
+                # REVISIT: zero out angle
+                angle = random.uniform(0, 360) * 0
+                side = 512  # random.randint(256, 512)
                 half_side = side / 2
                 points = []
                 for dx, dy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
@@ -160,13 +162,16 @@ class FluxFillDataset(Dataset):
                     points.append([rx, ry])
                 return np.array(points, dtype=np.float32)
 
-            def get_perspective_transform(points: np.ndarray, size: Tuple[int, int] = (512, 512)) -> np.ndarray:
+            def get_perspective_transform(
+                    points: np.ndarray,
+                    size: Tuple[int, int] = (512, 512)) -> np.ndarray:
                 target = np.array([[0, 0], [size[0], 0], [size[0], size[1]], [
                                   0, size[1]]], dtype=np.float32)
                 return cv2.getPerspectiveTransform(points, target)
 
             points = get_random_square_points()
-            # points = np.array([[0, 0], [512, 0], [512, 512], [0, 512]], dtype=np.float32)
+            # points = np.array([[0, 0], [512, 0],
+            #                    [512, 512], [0, 512]], dtype=np.float32)
             M = get_perspective_transform(points)
             img = np.array(img)
             img = cv2.warpPerspective(img, M, (512, 512))
@@ -195,7 +200,8 @@ class OptimalTransportPath:
         b = 0.5 - m * 256
         def mu(x): return m * x + b
         mu = mu((1024 // 8) * (1024 // 8) // 4)
-        # self.timesteps = math.exp(mu) / math.exp(mu) + (1 / self.timesteps - 1) ** 1.
+        # self.timesteps = math.exp(mu) / math.exp(mu) + (
+        #       1 / self.timesteps - 1) ** 1.
 
         x = torch.arange(num_timesteps, dtype=torch.float32)
         y = torch.exp(-2 * ((x - num_timesteps / 2) / num_timesteps) ** 2)
@@ -315,10 +321,14 @@ def prepare_fill(
     return return_dict
 
 
-def main():
+def main(args):
     config = TrainingConfig()
-    config.outdir = Path(config.outdir)
-    config.outdir.mkdir(exist_ok=True, parents=True)
+    args.outdir = Path(args.outdir)
+    args.outdir.mkdir(exist_ok=True, parents=True)
+    config.batch_size = args.batch_size
+    config.num_epochs = args.epochs
+    config.learning_rate = args.learning_rate
+    config.save_every = args.save_every
     offload = False
     device = torch.device("cuda:0")
 
@@ -358,24 +368,30 @@ def main():
 
     model.requires_grad_(False)
 
-    from flux.model import PosEncProcessor
-
-    def set_requires_grad_recursive(module, name=''):
+    def init_and_set_requires_grad_recursive(module, name=''):
         if isinstance(module, LinearLora):
             module.requires_grad_(False)
+            torch.nn.init.kaiming_uniform_(module.lora_A.weight)
+            torch.nn.init.zeros_(module.lora_B.weight)
+            torch.nn.init.zeros_(module.lora_B.bias)
             module.lora_A.requires_grad_(True)
             module.lora_B.requires_grad_(True)
+            # module.lora_A.to_empty(device="cpu")
+            # module.lora_B.to_empty(device="cpu")
         elif isinstance(module, PosEncProcessor):
+            module.requires_grad_(True)
+            # module.to_empty(device="cpu")
+        elif False and isinstance(module, SelfAttention):
             module.requires_grad_(True)
         for child_name, child in module.named_children():
             child_full_name = f"{name}.{child_name}" if name else child_name
-            set_requires_grad_recursive(child, child_full_name)
+            init_and_set_requires_grad_recursive(child, child_full_name)
 
-    set_requires_grad_recursive(model)
+    init_and_set_requires_grad_recursive(model)
 
     for name, param in model.named_parameters():
         if param.requires_grad:
-            print(name)
+            print(f"grad=True: {name}")
 
     gpu_config = GPUSplitConfig(
         gpu_ids=[0],  # List of GPU IDs to use
@@ -385,7 +401,7 @@ def main():
     model = split_flux_model_to_gpus(model, gpu_config)
     model = model.to()
 
-    dataset = FluxFillDataset(root="datasets/house")
+    dataset = FluxFillDataset(root=args.dataset)
 
     dataloader = DataLoader(
         dataset,
@@ -399,7 +415,7 @@ def main():
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate)
     scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer, step_size=1500, gamma=0.5)
+        optimizer, step_size=1500, gamma=0.75)
 
     # Training loop
     grad_accum_steps = max(1, len(dataset))
@@ -464,7 +480,8 @@ def main():
                 model.cpu()
                 torch.cuda.empty_cache()
         print(
-            f"Epoch {epoch+1}/{config.num_epochs}, Loss: {epoch_loss/len(dataloader):.4f}")
+            f"Epoch {epoch+1}/{config.num_epochs}, " +
+            f"Loss: {epoch_loss/len(dataloader):.4f}")
 
         if config.save_every > 0 and (epoch + 1) % config.save_every == 0:
             # torch.save(
@@ -474,14 +491,24 @@ def main():
             sd = model.state_dict()
             lora_dict = {k: sd[k]
                          for k in sd.keys() if "lora_" in k or "panorama" in k}
-            # save_file(model.state_dict(), config.outdir /
-            save_file(lora_dict, config.outdir /
+            # save_file(model.state_dict(), args.outdir /
+            save_file(lora_dict, args.outdir /
                       f"lora_checkpoint_epoch_{epoch+1}.safetensors")
     sd = model.state_dict()
     lora_dict = {k: sd[k]
                  for k in sd.keys() if "lora_" in k or "panorama" in k}
-    save_file(lora_dict, config.outdir / "lora_last.safetensors")
+    save_file(lora_dict, args.outdir / "lora_last.safetensors")
 
+
+parser = ArgumentParser()
+parser.add_argument("--dataset", required=True)
+parser.add_argument("--outdir", required=True)
+
+parser.add_argument("--batch-size", type=int, default=1)
+parser.add_argument("--learning-rate", type=float, default=1e-4)
+parser.add_argument("--epochs", type=int, default=5000)
+parser.add_argument("--save-every", type=int, default=1000)
 
 if __name__ == "__main__":
-    main()
+    args = parser.parse_args()
+    main(args)

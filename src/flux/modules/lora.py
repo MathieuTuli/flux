@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from flux.modules.layers import SelfAttention
 
 
 def replace_linear_with_lora(
@@ -15,6 +16,9 @@ def replace_linear_with_lora(
     for name, child in module.named_children():
         if name in keys_ignore:
             continue
+        if isinstance(child, SelfAttention):
+            # print("Skiping LoRA on SelfAttention")
+            pass
         if isinstance(child, nn.Linear):
             new_lora = LinearLora(
                 in_features=child.in_features,

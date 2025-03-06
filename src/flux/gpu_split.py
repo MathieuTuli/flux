@@ -143,7 +143,8 @@ def new_to_method(self, *args, **kwargs):
     # self.pos_embed = self.pos_embed.to(base_device, *args, **kwargs)
     self.panorama_embedder = self.panorama_embedder.to(base_device, *args, **kwargs)
     self.pe_embedder = self.pe_embedder.to(base_device, *args, **kwargs)
-    self.sphere_embedder = self.sphere_embedder.to(base_device, *args, **kwargs)
+    if hasattr(self, "sphere_embedder"):
+        self.sphere_embedder = self.sphere_embedder.to(base_device, *args, **kwargs)
     self.img_in = self.img_in.to(base_device, *args, **kwargs)
     self.time_in = self.time_in.to(base_device, *args, **kwargs)
     self.vector_in = self.vector_in.to(base_device, *args, **kwargs)

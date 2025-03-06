@@ -120,16 +120,17 @@ class PosEncProcessor(torch.nn.Module):
                  in_channels: int,
                  hidden_dim: int,
                  target_spatial: tuple[int, int],
+                 initial_dim: int = 128,
                  use_token_pos_encoding: bool = True):
         super().__init__()
-        self.initial_dim = 128
         self.hidden_dim = hidden_dim
+        self.initial_dim = initial_dim
         self.target_spatial = target_spatial
         self.use_token_pos_encoding = use_token_pos_encoding
         self.conv1 = torch.nn.Conv2d(
-            in_channels, self.initial_dim, kernel_size=4, stride=4)
+            in_channels, self.initial_dim, kernel_size=4, stride=2, padding=1)
         self.conv2 = torch.nn.Conv2d(
-            self.initial_dim, self.initial_dim, kernel_size=4, stride=4)
+            self.initial_dim, self.initial_dim, kernel_size=4, stride=2, padding=1)
         self.activation = torch.nn.GELU()
         self.pool = torch.nn.AdaptiveAvgPool2d(target_spatial)
         self.proj = torch.nn.Linear(self.initial_dim, hidden_dim)
@@ -164,9 +165,9 @@ class PosEncProcessor(torch.nn.Module):
         B, C, H, W = x.shape
         x = x.view(B, C, H * W).permute(0, 2, 1)
         x = self.proj(x)
-        x = self.layer_norm(x)
         if self.use_token_pos_encoding:
             x = x + self.token_pos_encoding.unsqueeze(0)
+        x = self.layer_norm(x)
         return x
 
 
@@ -191,7 +192,7 @@ class Flux(nn.Module):
                 f"Got {params.axes_dim} but expected positional dim {pe_dim}")
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
-        if True:  # use_spherical_rope:
+        if False:  # use_spherical_rope:
             self.sphere_embedder = QuaternionEmbed(dim=128, theta=params.theta)
         self.pe_embedder = EmbedND(
             dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
@@ -230,7 +231,7 @@ class Flux(nn.Module):
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
         self.panorama_embedder = PosEncProcessor(
             in_channels=8, hidden_dim=params.hidden_size,
-            target_spatial=(32, 32)
+            target_spatial=(16, 8), use_token_pos_encoding=True
         )
         # num_patches = 32 * 32
         # self.pos_embed = nn.Parameter(torch.zeros(
@@ -275,11 +276,13 @@ class Flux(nn.Module):
         # REVISIT: doing cause bs = 1
         # sphere_coords = sphere_coords.squeeze(0)
         sphere_pe = None
-        if sphere_coords is not None:
+        if False and sphere_coords is not None:
             pano_pe = self.panorama_embedder(
                 sphere_coords.to(torch.bfloat16)
             )
             img = img + pano_pe
+        elif sphere_coords is not None:
+            txt = self.panorama_embedder(sphere_coords.to(torch.bfloat16))
 
         for block in self.double_blocks:
             img, txt = block(img=img, txt=txt, vec=vec,
