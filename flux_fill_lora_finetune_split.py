@@ -3,28 +3,69 @@ from dataclasses import dataclass
 from typing import Tuple
 from pathlib import Path
 
+
 from safetensors.torch import load_file as load_sft, save_file
 from torch.utils.data import Dataset, DataLoader
 from huggingface_hub import hf_hub_download
 from einops import rearrange, repeat
+from torchvision import transforms
 from PIL import Image
 
+import matplotlib.pyplot as plt
 import numpy as np
 import random
+import base64
 import torch
 import math
+import sys
+import io
 
 from flux.util import (
     load_t5, load_clip, load_ae,
     configs, optionally_expand_state_dict,
     print_load_warning
 )
+
 from flux.gpu_split import split_flux_model_to_gpus, GPUSplitConfig
+from flux.sampling import denoise, get_noise, unpack, get_schedule
 from flux.modules.autoencoder import AutoEncoder
 from flux.modules.conditioner import HFEmbedder
 from flux.modules.layers import SelfAttention
 from flux.modules.lora import LinearLora
 from flux.model import PosEncProcessor, FluxLoraWrapper
+
+
+def t_to_p(img):
+    return transforms.ToPILImage()(img)
+
+
+def display_tensor(tensor, title=None):
+    """Display a tensor as an image using kitty graphics protocol"""
+
+    # Convert tensor to PIL Image
+    if tensor.dim() == 4:
+        tensor = tensor.squeeze(0)
+    if tensor.min() < 0 or tensor.max() > 1:
+        tensor = (tensor + 1) / 2  # Convert from [-1,1] to [0,1]
+    pil_img = transforms.ToPILImage()(tensor)
+
+    # Convert PIL image to PNG bytes
+    buffer = io.BytesIO()
+    pil_img.save(buffer, format='PNG')
+    img_data = buffer.getvalue()
+
+    # Encode in base64
+    img_base64 = base64.b64encode(img_data).decode('ascii')
+
+    # Print title if provided
+    if title:
+        print(f"\n--- {title} ---")
+
+    # Send kitty graphics command
+    sys.stdout.buffer.write(b'\033_Ga=T,f=100,s=' + str(pil_img.size[0]).encode(
+    ) + b',v=' + str(pil_img.size[1]).encode() + b';' + img_base64.encode() + b'\033\\')
+    sys.stdout.buffer.flush()
+    print()  # Add newline after image
 
 
 def create_sinusoidal_pos_enc(h: int, w: int,
@@ -59,30 +100,6 @@ def create_sinusoidal_pos_enc(h: int, w: int,
     return pos_enc
 
 
-def make_rec_mask(images, resolution, times=30):
-    mask, times = torch.ones_like(images[0:1, :, :]), np.random.randint(
-        1, times
-    )
-    min_size, max_size, margin = np.array([0.03, 0.25, 0.01]) * resolution
-    max_size = min(max_size, resolution - margin * 2)
-
-    for _ in range(times):
-        width = np.random.randint(int(min_size), int(max_size))
-        height = np.random.randint(int(min_size), int(max_size))
-
-        x_start = np.random.randint(
-            int(margin), resolution - int(margin) - width + 1
-        )
-        y_start = np.random.randint(
-            int(margin), resolution - int(margin) - height + 1
-        )
-        mask[:, y_start: y_start + height, x_start: x_start + width] = 0
-
-    mask = 1 - mask if random.random() < 0.5 else mask
-    # mask = mask * 0 if random.random() < 0.5 else mask
-    return mask
-
-
 @dataclass
 class TrainingConfig:
     batch_size: int = 1
@@ -103,6 +120,8 @@ class FluxFillDataset(Dataset):
         #                    if str(f).endswith(('mask.jpg', 'mask.png',
         #                                        'mask.jpeg'))]
         # assert len(self.image_paths) == len(self.mask_paths)
+        self.max_rectangle_scale = 0.2
+        self.num_mask_rect = 5
         self.prompt = prompt
         self.height = height
         self.width = width
@@ -118,76 +137,28 @@ class FluxFillDataset(Dataset):
         img = img.resize((2048, 2028))
         w, h = img.size
 
-        # x_positions = [x.item() for x in torch.arange(0, min(w, 1500) - 256, 256)]
-        # y_positions = [x.item() for x in torch.arange(0, min(h, 1500) - 256, 256)]
+        x = random.randint(0, 2048 - 512)
+        y = random.randint(0, 2048 - 512)
 
-        if False:
-            x_positions = torch.arange(0, 2048, 512)
-            y_positions = torch.arange(0, 2048, 512)
+        image_crop = img.crop((x, y, x + 512, y + 512))
+        # REVISIT:?
+        image_tensor = transforms.ToTensor()(image_crop) * 2.0 - 1.0
 
-            xidx = np.random.randint(len(x_positions))
-            yidx = np.random.randint(len(y_positions))
-            xpos = x_positions[xidx].item()
-            ypos = y_positions[yidx].item()
-            box = (xpos, ypos, xpos + 512, ypos + 512)
-            # img = img.crop(box)
-            sphere_coords = torch.tensor(
-                [xidx / 4, yidx / 4, 512 / 2048, 512 / 2048])
+        sphere_coords = self.pos_enc[:, y:y+512, x:x+512]
 
-            img = np.array(img)
-            img = torch.from_numpy(img).float() / 127.5 - 1.0
-            img = rearrange(img, "h w c -> c h w")
-
-            mask = make_rec_mask(
-                img.unsqueeze(0), resolution=512, times=30).squeeze(0)
+        mask = torch.ones_like(image_tensor)
+        if random.random() < 0.5:
+            mask.zero_()
         else:
-            import math
-            import cv2
+            erase_transform = transforms.RandomErasing(
+                p=1., scale=(0.05, self.max_rectangle_scale),
+                ratio=(0.3, 3.3), value=0, inplace=True)
+            for _ in range(self.num_mask_rect):
+                erase_transform(mask)
+            if random.random() < 0.5:
+                mask = 1 - mask
 
-            def get_random_square_points() -> np.ndarray:
-                cx = random.randint(256, 2048 - 256)
-                cy = random.randint(256, 2048 - 256)
-                # REVISIT: zero out angle
-                angle = random.uniform(0, 360) * 0
-                side = 512  # random.randint(256, 512)
-                half_side = side / 2
-                points = []
-                for dx, dy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
-                    x = cx + dx * half_side
-                    y = cy + dy * half_side
-                    rx = (x - cx) * math.cos(math.radians(angle)) - \
-                        (y - cy) * math.sin(math.radians(angle)) + cx
-                    ry = (x - cx) * math.sin(math.radians(angle)) + \
-                        (y - cy) * math.cos(math.radians(angle)) + cy
-                    points.append([rx, ry])
-                return np.array(points, dtype=np.float32)
-
-            def get_perspective_transform(
-                    points: np.ndarray,
-                    size: Tuple[int, int] = (512, 512)) -> np.ndarray:
-                target = np.array([[0, 0], [size[0], 0], [size[0], size[1]], [
-                                  0, size[1]]], dtype=np.float32)
-                return cv2.getPerspectiveTransform(points, target)
-
-            points = get_random_square_points()
-            # points = np.array([[0, 0], [512, 0],
-            #                    [512, 512], [0, 512]], dtype=np.float32)
-            M = get_perspective_transform(points)
-            img = np.array(img)
-            img = cv2.warpPerspective(img, M, (512, 512))
-            img = torch.from_numpy(img).float() / 127.5 - 1.0
-            img = rearrange(img, "h w c -> c h w")
-            sphere_coords = torch.stack([torch.from_numpy(
-                cv2.warpPerspective(self.pos_enc[i].numpy(),
-                                    M, (512, 512), flags=cv2.INTER_LINEAR,
-                                    borderMode=cv2.BORDER_CONSTANT))
-                for i in range(self.pos_enc.shape[0])])
-
-        mask = make_rec_mask(
-            img.unsqueeze(0), resolution=512, times=30).squeeze(0)
-        if sphere_coords is None:
-            return img, mask
-        return img, mask, sphere_coords
+        return image_tensor, mask, sphere_coords
 
 
 class OptimalTransportPath:
@@ -321,10 +292,35 @@ def prepare_fill(
     return return_dict
 
 
+def plot_loss_history(losses, max_epochs, current_epoch):
+    """Plot loss history and display using kitty graphics protocol"""
+    plt.figure(figsize=(10, 5))
+    plt.plot(losses)
+    plt.title(f'Training Loss (Epoch {current_epoch}/{max_epochs})')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.yscale('log')  # Use log scale for y-axis
+    plt.grid(True, which="both", ls="-", alpha=0.2)
+    plt.grid(True, which="minor", ls=":", alpha=0.2)
+
+    # Save plot to bytes buffer
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close()
+    buf.seek(0)
+
+    # Convert to PIL Image and display
+    img = Image.open(buf)
+    display_tensor(transforms.ToTensor()(img), "Loss History")
+
+
 def main(args):
     config = TrainingConfig()
     args.outdir = Path(args.outdir)
     args.outdir.mkdir(exist_ok=True, parents=True)
+
+    # Initialize loss history
+    loss_history = []
     config.batch_size = args.batch_size
     config.num_epochs = args.epochs
     config.learning_rate = args.learning_rate
@@ -352,46 +348,73 @@ def main(args):
         ckpt_path = hf_hub_download(
             configs[name].repo_id, configs[name].repo_flow)
 
-    with torch.device("cpu" if ckpt_path is not None else device):
+    with torch.device("meta" if ckpt_path is not None else device):
         model = FluxLoraWrapper(lora_rank=128,
                                 params=configs[name].params).to(torch.bfloat16)
 
     if ckpt_path is not None:
         print("Loading checkpoint")
-        # load_sft doesn't support torch.device
-        sd = load_sft(
-            ckpt_path, device="cpu")
+        # First move from meta to empty on the target device
+        model = model.to_empty(device=device)
+        # Then load the checkpoint
+        sd = load_sft(ckpt_path, device="cpu")
         sd = optionally_expand_state_dict(model, sd)
         missing, unexpected = model.load_state_dict(
             sd, strict=False, assign=True)
         print_load_warning(missing, unexpected)
+    else:
+        # If no checkpoint, just move directly to device
+        model = model.to(device)
 
     model.requires_grad_(False)
 
     def init_and_set_requires_grad_recursive(module, name=''):
         if isinstance(module, LinearLora):
             module.requires_grad_(False)
-            torch.nn.init.kaiming_uniform_(module.lora_A.weight)
-            torch.nn.init.zeros_(module.lora_B.weight)
-            torch.nn.init.zeros_(module.lora_B.bias)
+            # Initialize weights while they're in float32
+            with torch.cuda.device(device):
+                if module.lora_A.weight.is_meta:
+                    module.lora_A.weight = torch.nn.Parameter(
+                        torch.empty_like(module.lora_A.weight, device=device))
+                if module.lora_B.weight.is_meta:
+                    module.lora_B.weight = torch.nn.Parameter(
+                        torch.empty_like(module.lora_B.weight, device=device))
+
+                torch.nn.init.kaiming_uniform_(module.lora_A.weight.data)
+                torch.nn.init.zeros_(module.lora_B.weight.data)
+
+                # Convert to bfloat16
+                module.lora_A.weight.data = module.lora_A.weight.data.to(
+                    torch.bfloat16)
+                module.lora_B.weight.data = module.lora_B.weight.data.to(
+                    torch.bfloat16)
+
+                if hasattr(module.lora_B, 'bias') and module.lora_B.bias is not None:
+                    if module.lora_B.bias.is_meta:
+                        module.lora_B.bias = torch.nn.Parameter(
+                            torch.zeros_like(module.lora_B.bias, device=device))
+                    torch.nn.init.zeros_(module.lora_B.bias)
+
             module.lora_A.requires_grad_(True)
             module.lora_B.requires_grad_(True)
-            # module.lora_A.to_empty(device="cpu")
-            # module.lora_B.to_empty(device="cpu")
         elif isinstance(module, PosEncProcessor):
             module.requires_grad_(True)
-            # module.to_empty(device="cpu")
         elif False and isinstance(module, SelfAttention):
             module.requires_grad_(True)
+
         for child_name, child in module.named_children():
             child_full_name = f"{name}.{child_name}" if name else child_name
             init_and_set_requires_grad_recursive(child, child_full_name)
 
+    # Then initialize LoRA weights
+    model = model.to(device)  # Move to device before initialization
     init_and_set_requires_grad_recursive(model)
 
     for name, param in model.named_parameters():
         if param.requires_grad:
             print(f"grad=True: {name}")
+            if torch.isnan(param).any():
+                print(f"WARNING: NaN detected in {name}")
 
     gpu_config = GPUSplitConfig(
         gpu_ids=[0],  # List of GPU IDs to use
@@ -415,13 +438,14 @@ def main(args):
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=config.learning_rate)
     scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer, step_size=1500, gamma=0.75)
+        optimizer, step_size=3000, gamma=0.75)
 
     # Training loop
     grad_accum_steps = max(1, len(dataset))
     print("Setting grad accum step:", grad_accum_steps)
     with open("train.log", "w") as f:
         f.write("epoch,step,loss\n")
+    debug_img = args.debug_img > 0
     for epoch in range(config.num_epochs):
         model.train()
         epoch_loss = 0.
@@ -434,6 +458,11 @@ def main(args):
             else:
                 img, mask = batch
                 sphere_coords = None
+            if debug_img:
+                if epoch >= debug_img:
+                    debug_img = 0
+                display_tensor(img, "Input Image")
+                display_tensor(mask, "Mask")
             img, mask = img.to(device), mask.to(device)
             inputs = prepare_fill(
                 t5=t5, clip=clip, ae=ae,
@@ -450,6 +479,36 @@ def main(args):
             for k in inputs.keys():
                 inputs[k] = inputs[k].to(device)
                 inputs[k] = inputs[k].to(torch.bfloat16)
+
+            if epoch % 100 == 0:
+                model.eval()
+                with torch.no_grad():
+                    height = width = 512
+                    x = get_noise(
+                        1,
+                        height,
+                        width,
+                        device=device,
+                        dtype=torch.bfloat16,
+                        seed=420
+                    )
+                    inputs["sphere_coords"] = sphere_coords if args.sphere_coords == 1 else None
+                    print("Validation...")
+                    timesteps = get_schedule(
+                        50, inputs["img"].shape[1], shift=(name != "flux-schnell"))
+                    torch.cuda.empty_cache()
+                    x = denoise(model, **inputs, timesteps=timesteps, guidance=1)
+                    x = unpack(x.float(), height, width)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        x = ae.decode(x)
+                display_tensor(img,
+                               f"Validation Target {epoch}/{config.num_epochs}")
+                display_tensor(mask,
+                               f"Validation Target {epoch}/{config.num_epochs}")
+                x = x.clamp(-1, 1)
+                display_tensor(x.to(torch.float32),
+                               f"Validation Pred {epoch}/{config.num_epochs}")
+                model.train()
             pred = model(
                 img=torch.cat((inputs["img"], inputs["img_cond"]), dim=-1),
                 img_ids=inputs["img_ids"],
@@ -465,9 +524,8 @@ def main(args):
                 pred, inputs["vt"], reduction="mean")
             # loss += (loss * inputs["weights"] / grad_accum_steps)
             loss += loss / grad_accum_steps
-            del inputs
             loss.backward()
-            print(f"Step loss: {loss.item():.4f}")
+            # print(f"Step loss: {loss.item():.4f}")
             with open("train.log", "a+") as f:
                 f.write(f"{epoch},{step},{loss.item()}\n")
             if ((step + 1) % grad_accum_steps) == 0:
@@ -479,9 +537,15 @@ def main(args):
             if offload:
                 model.cpu()
                 torch.cuda.empty_cache()
+        avg_epoch_loss = epoch_loss/len(dataloader)
+        loss_history.append(avg_epoch_loss)
+
+        # Plot loss every 100 epochs
+        if epoch % 100 == 0:
+            plot_loss_history(loss_history, config.num_epochs, epoch + 1)
         print(
             f"Epoch {epoch+1}/{config.num_epochs}, " +
-            f"Loss: {epoch_loss/len(dataloader):.4f}")
+            f"Loss: {avg_epoch_loss:.4f}")
 
         if config.save_every > 0 and (epoch + 1) % config.save_every == 0:
             # torch.save(
@@ -492,6 +556,7 @@ def main(args):
             lora_dict = {k: sd[k]
                          for k in sd.keys() if "lora_" in k or "panorama" in k}
             # save_file(model.state_dict(), args.outdir /
+            print(f"Saved checkpoint lora_checkpoint_epoch_{epoch+1}.safetensors.")
             save_file(lora_dict, args.outdir /
                       f"lora_checkpoint_epoch_{epoch+1}.safetensors")
     sd = model.state_dict()
@@ -508,6 +573,8 @@ parser.add_argument("--batch-size", type=int, default=1)
 parser.add_argument("--learning-rate", type=float, default=1e-4)
 parser.add_argument("--epochs", type=int, default=5000)
 parser.add_argument("--save-every", type=int, default=1000)
+parser.add_argument("--debug-img", type=int, default=0)
+parser.add_argument("--sphere-coords", type=int, default=1)
 
 if __name__ == "__main__":
     args = parser.parse_args()

@@ -231,7 +231,7 @@ class Flux(nn.Module):
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
         self.panorama_embedder = PosEncProcessor(
             in_channels=8, hidden_dim=params.hidden_size,
-            target_spatial=(16, 8), use_token_pos_encoding=True
+            target_spatial=(16, 8), use_token_pos_encoding=False
         )
         # num_patches = 32 * 32
         # self.pos_embed = nn.Parameter(torch.zeros(
@@ -267,21 +267,10 @@ class Flux(nn.Module):
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
 
-        # img_ids[:, :, 1:] = img_ids[:, :, 1:] + 0.1 * sphere_coords
-        # img = img + self.pos_embed.squeeze(0).chunk(4)[sphere_coords.item()].unsqueeze(0).to(img.device).to(torch.bfloat16)
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
-        # sphere_pe = None
-        # sphere_coords = None
-        # REVISIT: doing cause bs = 1
-        # sphere_coords = sphere_coords.squeeze(0)
         sphere_pe = None
-        if False and sphere_coords is not None:
-            pano_pe = self.panorama_embedder(
-                sphere_coords.to(torch.bfloat16)
-            )
-            img = img + pano_pe
-        elif sphere_coords is not None:
+        if sphere_coords is not None:
             txt = self.panorama_embedder(sphere_coords.to(torch.bfloat16))
 
         for block in self.double_blocks:

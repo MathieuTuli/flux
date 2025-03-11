@@ -4,10 +4,9 @@ import time
 from dataclasses import dataclass
 import numpy as np
 import math
-from einops import rearrange
-import random
 import torchvision
 from glob import iglob
+import io
 
 import torch
 from fire import Fire
@@ -27,7 +26,40 @@ from flux.util import (
 from flux.gpu_split import split_flux_model_to_gpus, GPUSplitConfig
 
 
-def create_sinusoidal_pos_enc(h: int, w: int, pos_enc_channels: int = 4, pos_enc_cross: int = 0) -> torch.Tensor:
+def display_tensor(tensor, title=None):
+    """Display a tensor as an image using kitty graphics protocol"""
+    import base64
+    import sys
+
+    # Convert tensor to PIL Image
+    if tensor.dim() == 4:
+        tensor = tensor.squeeze(0)
+    if tensor.min() < 0 or tensor.max() > 1:
+        tensor = (tensor + 1) / 2  # Convert from [-1,1] to [0,1]
+    pil_img = torchvision.transforms.ToPILImage()(tensor)
+
+    # Convert PIL image to PNG bytes
+    buffer = io.BytesIO()
+    pil_img.save(buffer, format='PNG')
+    img_data = buffer.getvalue()
+
+    # Encode in base64
+    img_base64 = base64.b64encode(img_data).decode('ascii')
+
+    # Print title if provided
+    if title:
+        print(f"\n--- {title} ---")
+
+    # Send kitty graphics command
+    sys.stdout.buffer.write(b'\033_Ga=T,f=100,s=' + str(pil_img.size[0]).encode(
+    ) + b',v=' + str(pil_img.size[1]).encode() + b';' + img_base64.encode() + b'\033\\')
+    sys.stdout.buffer.flush()
+    print()  # Add newline after image
+
+
+def create_sinusoidal_pos_enc(h: int, w: int,
+                              pos_enc_channels: int = 4,
+                              pos_enc_cross: int = 0) -> torch.Tensor:
     assert pos_enc_channels in [
         4, 8, 12], "pos_enc_channels must be 4, 8, or 12"
     assert pos_enc_cross in [0, 1, 2], "pos_enc_cross must be 0, 1, or 2"
@@ -37,8 +69,9 @@ def create_sinusoidal_pos_enc(h: int, w: int, pos_enc_channels: int = 4, pos_enc
     y = torch.linspace(-1, 1, h)
     Y, X = torch.meshgrid(y, x, indexing='ij')
     pos_enc = torch.zeros((pos_enc_channels, h, w))
-    freqs = [2.7, 3.3]
     pairs_per_dim = (pos_enc_channels - 2 * pos_enc_cross) // 4
+    freqs = torch.exp(torch.linspace(
+        math.log(1.0), math.log(10.0), pairs_per_dim))
     for i in range(pairs_per_dim):
         pos_enc[2*i] = torch.sin(X * np.pi * freqs[i])
         pos_enc[2*i + 1] = torch.cos(X * np.pi * freqs[i])
@@ -185,58 +218,24 @@ def main(
 
     rng = torch.Generator(device="cpu")
 
-    import cv2
-
-    def get_random_square_points() -> np.ndarray:
-        cx = random.randint(256, 768)
-        cy = random.randint(256, 768)
-        angle = random.uniform(0, 360)
-        side = random.randint(256, 512)
-        half_side = side / 2
-        points = []
-        for dx, dy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
-            x = cx + dx * half_side
-            y = cy + dy * half_side
-            rx = (x - cx) * math.cos(math.radians(angle)) - \
-                (y - cy) * math.sin(math.radians(angle)) + cx
-            ry = (x - cx) * math.sin(math.radians(angle)) + \
-                (y - cy) * math.cos(math.radians(angle)) + cy
-            points.append([rx, ry])
-        return np.array(points, dtype=np.float32)
-
-    def get_perspective_transform(points: np.ndarray, size: tuple[int, int] = (512, 512)) -> np.ndarray:
-        target = np.array([[0, 0], [size[0], 0], [size[0], size[1]], [
-                          0, size[1]]], dtype=np.float32)
-        return cv2.getPerspectiveTransform(points, target)
-
     pos_enc = create_sinusoidal_pos_enc(
         2048, 2048, 8, 0)
-
     pano_path = img_cond_path
     tidx = 0
-    for ypos in torch.arange(0, 2048, 256):
-        for xpos in torch.arange(0, 2048, 256):
-            img = Image.open(pano_path)
+    for ypos in torch.arange(0, 2048, 512):
+        for xpos in torch.arange(0, 2048, 512):
+            xpos = int(xpos)
+            ypos = int(ypos)
+            img = Image.open(pano_path).convert("RGB")
             img = img.resize((2048, 2028))
-            points = np.array([[0, 0],
-                               [512, 0],
-                               [512, 512],
-                               [0, 512]], dtype=np.float32) + np.array([xpos, ypos], dtype=np.float32)
-            M = get_perspective_transform(points)
-            img = np.array(img)
-            img = cv2.warpPerspective(img, M, (512, 512))
+            image_crop = img.crop((xpos, ypos, xpos + 512, ypos + 512))
+            image_tensor = torchvision.transforms.ToTensor()(image_crop)
+            sphere_coords = pos_enc[:, ypos:ypos +
+                                    512, xpos:xpos+512].unsqueeze(0)
             img_cond_path = f"output/img_{tidx}_{tidx}.png"
             tidx += 1
-            img = torch.from_numpy(img).to(torch.uint8)
-            img = rearrange(img, "h w c -> c h w")
-            torchvision.transforms.ToPILImage()(img).save(img_cond_path)
-            sphere_coords = torch.stack([torch.from_numpy(
-                cv2.warpPerspective(pos_enc[i].numpy(),
-                                    M, (512, 512), flags=cv2.INTER_LINEAR,
-                                    borderMode=cv2.BORDER_CONSTANT))
-                for i in range(pos_enc.shape[0])]).unsqueeze(0)
-
-            # img = torchvision.transforms.ToPILImage()(img)
+            display_tensor(image_tensor, "Inference Image")
+            image_crop.save(img_cond_path)
 
             width, height = 512, 512
             opts = SamplingOptions(
@@ -249,7 +248,6 @@ def main(
                 img_cond_path=img_cond_path,
                 img_mask_path=img_mask_path,
             )
-
 
             while opts is not None:
                 if opts.seed is None:
@@ -289,12 +287,13 @@ def main(
                     torch.cuda.empty_cache()
                     model = model.to(torch_device)
 
-                x = 1
+                # x = 1
                 # torch.Tensor([[0, 0], [x, x]]).unsqueeze(0)
                 # sphere_coords = torch.tensor([0 / 4, 0 / 4, 512 / 1536, 512 / 1536])
                 inp["sphere_coords"] = sphere_coords
                 # denoise initial noise
-                x = denoise(model, **inp, timesteps=timesteps, guidance=opts.guidance)
+                x = denoise(model, **inp, timesteps=timesteps,
+                            guidance=opts.guidance)
 
                 # offload model, load autoencoder to gpu
                 if offload:
@@ -314,6 +313,8 @@ def main(
 
                 idx = save_image(nsfw_classifier, name, output_name,
                                  idx, x, add_sampling_metadata, prompt)
+                x = x.clamp(-1, 1)
+                display_tensor(x.to(torch.float32), "Prediction")
                 opts = None
 
 
